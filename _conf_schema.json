@@ -4,6 +4,41 @@
     "description": "dsh-doubao-painter 插件目录（里面有 tools/paint.mjs）。留空 = 自动用 %USERPROFILE%\\.dsh\\plugins\\dsh-doubao-painter。",
     "default": ""
   },
+  "image_backend": {
+    "type": "string",
+    "description": "生图后端：doubao（本机豆包，默认）/ openai（任意 OpenAI 兼容的 /images/generations 接口）。",
+    "default": "doubao"
+  },
+  "api_base": {
+    "type": "string",
+    "description": "OpenAI 兼容接口的 base（含 /v1），例如 https://api.openai.com/v1、https://api.siliconflow.cn/v1。image_backend=openai 时必填。",
+    "default": "https://api.openai.com/v1"
+  },
+  "api_key": {
+    "type": "string",
+    "description": "接口密钥（image_backend=openai 时必填）。只存在本机配置里。",
+    "default": ""
+  },
+  "image_model": {
+    "type": "string",
+    "description": "生图模型名，例如 gpt-image-1 / flux-schnell / seedream-3.0。",
+    "default": "gpt-image-1"
+  },
+  "image_size": {
+    "type": "string",
+    "description": "图片尺寸，例如 1024x1024；留空就不传。",
+    "default": "1024x1024"
+  },
+  "image_count": {
+    "type": "int",
+    "description": "一次要几张（1~4，默认 1）。",
+    "default": 1
+  },
+  "use_edits": {
+    "type": "bool",
+    "description": "带参考图时走 /images/edits（图生图）；接口不支持就关掉，只用文字生成。",
+    "default": true
+  },
   "node_path": {
     "type": "string",
     "description": "node 可执行文件。PATH 里有就写 node；也可以写完整路径。",

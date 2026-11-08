@@ -155,6 +155,21 @@ node 版本：v22+ / v26
 
 ---
 
+## 5.5 想用别的生图模型（可选）
+
+把 `image_backend` 改成 `openai`，然后填：
+
+| 键 | 例子 | 说明 |
+| --- | --- | --- |
+| `api_base` | `https://api.siliconflow.cn/v1` | 到 `/v1` 为止，别带 `/images/generations` |
+| `api_key` | `sk-xxx` | 只存本机 |
+| `image_model` | `Kwai-Kolors/Kolors` | 服务商给的模型名 |
+| `image_size` | `1024x1024` | 留空不传 |
+| `image_count` | 1 | 1~4 |
+| `use_edits` | true | 带参考图走 `/images/edits`；不支持就关 |
+
+验证：说「画一张蓝色小鲸鱼」，能收到图；再说「照这张画成水彩」（带图），看日志是不是走 `edits`。
+
 ## 6. 排查表
 
 | 症状 | 原因 | 修法 |

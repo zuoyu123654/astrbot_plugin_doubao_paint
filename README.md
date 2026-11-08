@@ -81,6 +81,29 @@
 
 ---
 
+## 换成别的生图接口（不用豆包也行）
+
+`image_backend` 换成 `openai`，就能接**任何 OpenAI 兼容**的 `/images/generations` 接口
+（OpenAI、硅基流动、各种中转站、自建服务都算）：
+
+```json
+{
+  "image_backend": "openai",
+  "api_base": "https://api.siliconflow.cn/v1",
+  "api_key": "sk-xxxx",
+  "image_model": "Kwai-Kolors/Kolors",
+  "image_size": "1024x1024",
+  "image_count": 1,
+  "use_edits": true
+}
+```
+
+- **纯文字**：POST `{api_base}/images/generations`，收 `b64_json` 或 `url`，存下来发回 QQ。
+- **带参考图**：走 `{api_base}/images/edits`（multipart，字段名 `image`）；接口不支持就把
+  `use_edits` 关掉——那就只按文字画，参考图会被忽略。
+- 返回格式要 OpenAI 那套：`{"data":[{"b64_json": "..."}]}` 或 `{"data":[{"url": "..."}]}`。
+- 豆包后端（`image_backend: doubao`）仍然照旧，两套互不影响。
+
 ## 关于水印（实测结论，2026-11-08）
 
 - 插件拿到的是豆包 CDN 上的 **cgen 原图**（1536×1536 / 1920×1280），不是 384px 缩略图——

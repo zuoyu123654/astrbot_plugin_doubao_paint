@@ -18,6 +18,7 @@ desc: >-
   4. **按状态画**：只读 `astrbot_plugin_private_companion` 里此刻的情绪/精力/天气，
      写进给豆包的提示词——她画出来的就是「现在的她」。
   5. 自检工具 `doubao_paint_status`：查 painter 脚本、node、豆包调试端口、参考图、状态读取。
+  6. 可以不用豆包：`image_backend=openai` 接任意 OpenAI 兼容生图接口（OpenAI/硅基流动/中转站）。
 
   【关于水印】取的是豆包 CDN 的 cgen 原图（高清）；但免费套餐账号的原图仍带「豆包 AI生成」水印，
   要完全无水印需要会员账号。
@@ -30,7 +31,7 @@ desc: >-
   AI 会按 SETUP-FOR-AI.md 检查 node/豆包/painter、填好路径、放好角色参考图，
   最后真画一张验证链路。
 
-version: 0.1.4
+version: 0.2.0
 author: paopao
 repo: https://github.com/zuoyu123654/astrbot_plugin_doubao_paint
 astrbot_version: ">=4.17.0"

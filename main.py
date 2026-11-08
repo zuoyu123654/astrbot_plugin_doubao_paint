@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.1.4"
+PLUGIN_VERSION = "0.2.0"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -99,6 +99,20 @@ class DoubaoPaintPlugin(Star):
         except (TypeError, ValueError):
             self.pending_minutes = 5
         self.auto_paint_next_image = bool(cfg.get("auto_paint_on_next_image", True))
+
+        # 生图后端：doubao（本机豆包）或 openai（任意 OpenAI 兼容的 /images/generations）
+        self.backend = str(cfg.get("image_backend", "doubao") or "doubao").strip().lower()
+        if self.backend not in ("doubao", "openai"):
+            self.backend = "doubao"
+        self.api_base = str(cfg.get("api_base", "https://api.openai.com/v1") or "").strip().rstrip("/")
+        self.api_key = str(cfg.get("api_key", "") or "").strip()
+        self.image_model = str(cfg.get("image_model", "gpt-image-1") or "gpt-image-1").strip()
+        self.image_size = str(cfg.get("image_size", "1024x1024") or "").strip()
+        try:
+            self.image_count = max(1, min(4, int(cfg.get("image_count", 1) or 1)))
+        except (TypeError, ValueError):
+            self.image_count = 1
+        self.use_edits = bool(cfg.get("use_edits", True))
 
         self.read_state = bool(cfg.get("read_state", True))
         self.state_plugin = str(cfg.get("state_plugin", "astrbot_plugin_private_companion") or "").strip()
@@ -242,7 +256,7 @@ class DoubaoPaintPlugin(Star):
                 "蓝色渐变长发、头顶呆毛、耳侧鲸鳍、深蓝白色女仆裙、身后大鲸尾，Q 版圆润。"
             )
         async with self._lock:
-            ok, err, files = await self._run_painter(body, refs)
+            ok, err, files = await self._generate(body, refs)
         if not ok or not files:
             logger.warning("[DoubaoPaint] 补图后生成失败：%s", err)
             try:
@@ -581,7 +595,7 @@ class DoubaoPaintPlugin(Star):
 
         # 3) 调 painter（一次只能跑一个，加锁）
         async with self._lock:
-            ok, err, files = await self._run_painter(body, refs)
+            ok, err, files = await self._generate(body, refs)
         if not ok or not files:
             logger.warning("[DoubaoPaint] 生成失败：%s", err)
             return f"画失败了：{err or '没有拿到图片'}"
@@ -597,6 +611,110 @@ class DoubaoPaintPlugin(Star):
             return f"画好了，但发图失败：{exc}"
 
         return "画好了，图已经发给你了"
+
+    async def _generate(self, prompt: str, refs: list[str]) -> tuple[bool, str, list[str]]:
+        """按配置选后端：本机豆包，或任意 OpenAI 兼容的生图接口。"""
+
+        if self.backend == "openai":
+            return await self._run_openai(prompt, refs)
+        return await self._run_painter(prompt, refs)
+
+    async def _run_openai(self, prompt: str, refs: list[str]) -> tuple[bool, str, list[str]]:
+        if not self.api_base:
+            return False, "没配 api_base（image_backend=openai）", []
+        if not self.api_key:
+            return False, "没配 api_key（image_backend=openai）", []
+        try:
+            return await asyncio.to_thread(self._openai_sync, prompt, refs)
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)[:300], []
+
+    def _openai_sync(self, prompt: str, refs: list[str]) -> tuple[bool, str, list[str]]:
+        import base64
+        import mimetypes
+        import urllib.request
+        import uuid as _uuid
+
+        refs = [r for r in refs if Path(r).is_file()][:1]
+        timeout = self.timeout_sec
+        if refs and self.use_edits:
+            url = self.api_base + "/images/edits"
+            boundary = "----dp" + _uuid.uuid4().hex
+            parts: list[bytes] = []
+
+            def field(name: str, value: str) -> None:
+                parts.append(
+                    (
+                        f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
+                        f"{value}\r\n"
+                    ).encode()
+                )
+
+            field("model", self.image_model)
+            field("prompt", prompt)
+            if self.image_size:
+                field("size", self.image_size)
+            field("n", str(self.image_count))
+            ctype = mimetypes.guess_type(refs[0])[0] or "application/octet-stream"
+            parts.append(
+                (
+                    f"--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; "
+                    f"filename=\"ref{Path(refs[0]).suffix}\"\r\nContent-Type: {ctype}\r\n\r\n"
+                ).encode()
+            )
+            parts.append(Path(refs[0]).read_bytes())
+            parts.append(f"\r\n--{boundary}--\r\n".encode())
+            data = b"".join(parts)
+            headers = {
+                "Authorization": "Bearer " + self.api_key,
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            }
+        else:
+            url = self.api_base + "/images/generations"
+            payload = {
+                "model": self.image_model,
+                "prompt": prompt,
+                "n": self.image_count,
+                "response_format": "b64_json",
+            }
+            if self.image_size:
+                payload["size"] = self.image_size
+            data = json.dumps(payload).encode()
+            headers = {
+                "Authorization": "Bearer " + self.api_key,
+                "Content-Type": "application/json",
+            }
+
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", "ignore")
+        except Exception as exc:  # noqa: BLE001
+            body = getattr(exc, "read", lambda: b"")()
+            detail = body.decode("utf-8", "ignore")[:200] if isinstance(body, bytes) else ""
+            return False, f"{exc} {detail}".strip(), []
+
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return False, "接口返回的不是 JSON：" + raw[:200], []
+        items = payload.get("data") or []
+        files: list[str] = []
+        for i, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            out = self.image_dir / f"api-{int(time.time())}-{i + 1}.png"
+            if item.get("b64_json"):
+                out.write_bytes(base64.b64decode(item["b64_json"]))
+                files.append(str(out))
+            elif item.get("url"):
+                with urllib.request.urlopen(item["url"], timeout=timeout) as r:
+                    out.write_bytes(r.read())
+                files.append(str(out))
+        if not files:
+            err = payload.get("error") or payload
+            return False, "接口没返回图片：" + str(err)[:200], []
+        return True, "", files
 
     async def _run_painter(self, prompt: str, refs: list[str]) -> tuple[bool, str, list[str]]:
         script = self._painter_script()
