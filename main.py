@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.5.2"
+PLUGIN_VERSION = "0.5.3"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -722,6 +722,12 @@ class DoubaoPaintPlugin(Star):
         except Exception:  # noqa: BLE001
             pass
 
+        # 没有陪伴插件（或读不到状态）⇒ 明确告诉她用「时间 + 聊天内容」自己编一个合理画面
+        if len(bits) <= 1:
+            bits.append(
+                "（读不到她的状态和日程：没有装/没启用陪伴插件。"
+                "按当前时间和你俩刚才聊的内容，自己想一个合理的画面来画）"
+            )
         return "；".join(bits)
 
     def _constraint_block(self, now: datetime | None = None) -> str:

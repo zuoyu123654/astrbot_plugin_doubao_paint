@@ -38,7 +38,7 @@ desc: >-
 
   AI 会先问你要「本地豆包」还是「生图模型 API」，再按 SETUP-FOR-AI.md 配好、放参考图、真画一张验证。
 
-version: 0.5.2
+version: 0.5.3
 author: paopao
 repo: https://github.com/zuoyu123654/astrbot_plugin_doubao_paint
 astrbot_version: ">=4.17.0"
