@@ -1,0 +1,67 @@
+{
+  "painter_dir": {
+    "type": "string",
+    "description": "dsh-doubao-painter 插件目录（里面有 tools/paint.mjs）。留空 = 自动用 %USERPROFILE%\\.dsh\\plugins\\dsh-doubao-painter。",
+    "default": ""
+  },
+  "node_path": {
+    "type": "string",
+    "description": "node 可执行文件。PATH 里有就写 node；也可以写完整路径。",
+    "default": "node"
+  },
+  "app_exe": {
+    "type": "string",
+    "description": "豆包主程序路径（不是 launcher）。留空 = 让 painter 自己探测（D:\\Doubao\\app\\Doubao.exe、%LOCALAPPDATA%\\Doubao\\Application\\app\\Doubao.exe 等）。",
+    "default": ""
+  },
+  "cdp_port": {
+    "type": "int",
+    "description": "豆包的 Chrome DevTools 调试端口（默认 9225）。和别的调试程序冲突时改这里。",
+    "default": 9225
+  },
+  "timeout_seconds": {
+    "type": "int",
+    "description": "一次生成最多等多少秒（默认 240）。豆包出图一般 20~90 秒，四张图会更久。",
+    "default": 240
+  },
+  "out_dir": {
+    "type": "string",
+    "description": "生成的图存哪。留空 = 插件数据目录下的 images/。",
+    "default": ""
+  },
+  "keep_days": {
+    "type": "int",
+    "description": "生成的图保留几天（默认 7），超了自动删。",
+    "default": 7
+  },
+  "recent_image_minutes": {
+    "type": "int",
+    "description": "「先发图、后说需求」时，记住最近多少分钟内发过的图（默认 30）。",
+    "default": 30
+  },
+  "read_state": {
+    "type": "bool",
+    "description": "画「她现在的状态」时，去读陪伴插件的状态（情绪/精力/天气）。只读，不改。",
+    "default": true
+  },
+  "state_plugin": {
+    "type": "string",
+    "description": "读哪个插件的 plugin_data（默认 astrbot_plugin_private_companion）。",
+    "default": "astrbot_plugin_private_companion"
+  },
+  "state_read_all_files": {
+    "type": "bool",
+    "description": "默认关：只读 companions.json。打开后会扫对方 plugin_data 里所有 json，可能读到敏感数据，别随便开。",
+    "default": false
+  },
+  "self_ref_cute": {
+    "type": "string",
+    "description": "Q 版角色设定图路径。留空 = 在 <插件数据目录>/refs/ 里按文件名找（含 cute / q版 / chibi）。",
+    "default": ""
+  },
+  "self_ref_mature": {
+    "type": "string",
+    "description": "成熟版角色设定图路径。留空 = 在 <插件数据目录>/refs/ 里按文件名找（含 mature / 成熟）。",
+    "default": ""
+  }
+}

@@ -1,0 +1,478 @@
+"""豆包画画（astrbot_plugin_doubao_paint）
+
+把本机「豆包」桌面客户端的生图能力接进 AstrBot：
+用户在 QQ 里说「画一张……」，模型调用 `doubao_paint`，插件调
+dsh-doubao-painter 的命令行入口（lib/tools/paint.mjs）让豆包出图，
+拿到本地无水印原图后，直接把图发回当前会话。
+
+三个它专门解决的问题：
+  1. **图生图**：用户「图 + 需求」一起发 → 用消息里那张图当参考图；
+     分开发（先发图、再说「照这个画」）→ 记住最近发过的图，30 分钟内还用得上。
+  2. **她自己的形象**：内置两张角色设定图（Q 版 / 成熟版），
+     用户说「画一张你现在的状态」时，用角色图当参考图。
+  3. **状态与天气**：读 `astrbot_plugin_private_companion` 的 plugin_data
+     （只读、文件名白名单），把此刻的情绪/精力/天气等写进给豆包的提示词。
+
+不依赖 DSH 在线：直接跑 painter 的命令行（node）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.message_components import Image
+from astrbot.api.star import Context, Star, StarTools, register
+
+PLUGIN_NAME = "astrbot_plugin_doubao_paint"
+PLUGIN_VERSION = "0.1.0"
+
+# 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
+SELF_HINTS = (
+    "你自己", "你现在的", "你的样子", "你长什么样", "画你", "画个你", "画一只你",
+    "自画像", "泡泡", "本鲸鱼娘", "你的状态", "你此刻",
+)
+MATURE_HINTS = ("成熟", "长大", "成年", "御姐", "大只", "第二张", "第二个形象")
+
+# 读陪伴插件状态时只认这些 key（大小写不敏感的子串）
+STATE_HINTS = (
+    "mood", "emotion", "energy", "sleep", "weather", "city", "location",
+    "temperature", "relationship", "intimacy", "body", "health", "target",
+    "goal", "diary", "dream", "心情", "情绪", "精力", "睡眠", "天气", "城市",
+    "温度", "关系", "体温", "目标", "日记", "梦",
+)
+STATE_KEY_DESCEND = (
+    "daily_state", "state", "emotion", "mood", "weather", "environment",
+    "relationship", "sleep", "energy", "body", "location", "goal", "target",
+    "diary", "dream", "profile", "status",
+)
+NOISE_HINTS = ("id", "uid", "hash", "path", "file", "version", "updated_at", "created_at")
+
+
+@register(PLUGIN_NAME, "paopao", "豆包画画：让她用本机豆包出图，并把图发回 QQ", PLUGIN_VERSION)
+class DoubaoPaintPlugin(Star):
+    def __init__(self, context: Context, config: dict[str, Any] | None = None):
+        super().__init__(context)
+        self.context = context
+        cfg = config if isinstance(config, dict) else {}
+
+        self.painter_dir = str(cfg.get("painter_dir", "") or "").strip()
+        self.node_path = str(cfg.get("node_path", "") or "").strip() or "node"
+        self.app_exe = str(cfg.get("app_exe", "") or "").strip()
+        try:
+            self.cdp_port = int(cfg.get("cdp_port", 9225) or 9225)
+        except (TypeError, ValueError):
+            self.cdp_port = 9225
+        try:
+            self.timeout_sec = max(30, int(cfg.get("timeout_seconds", 240) or 240))
+        except (TypeError, ValueError):
+            self.timeout_sec = 240
+        try:
+            self.keep_days = max(1, int(cfg.get("keep_days", 7) or 7))
+        except (TypeError, ValueError):
+            self.keep_days = 7
+        try:
+            self.recent_minutes = max(1, int(cfg.get("recent_image_minutes", 30) or 30))
+        except (TypeError, ValueError):
+            self.recent_minutes = 30
+
+        self.read_state = bool(cfg.get("read_state", True))
+        self.state_plugin = str(cfg.get("state_plugin", "astrbot_plugin_private_companion") or "").strip()
+        self.state_read_all_files = bool(cfg.get("state_read_all_files", False))
+
+        self.ref_cute_cfg = str(cfg.get("self_ref_cute", "") or "").strip()
+        self.ref_mature_cfg = str(cfg.get("self_ref_mature", "") or "").strip()
+
+        try:
+            self.data_dir = Path(StarTools.get_data_dir(PLUGIN_NAME))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[DoubaoPaint] 拿不到插件数据目录（%s），临时文件放系统临时目录", exc)
+            self.data_dir = Path(os.environ.get("TEMP", ".")) / PLUGIN_NAME
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.ref_dir = self.data_dir / "refs"
+        self.ref_dir.mkdir(parents=True, exist_ok=True)
+        self.image_dir = Path(str(cfg.get("out_dir", "") or "").strip() or (self.data_dir / "images"))
+        self.image_dir.mkdir(parents=True, exist_ok=True)
+
+        self._lock = asyncio.Lock()
+        # session → [(path, ts)]，用来接「先发图、后说需求」
+        self._recent_images: dict[str, list[tuple[str, float]]] = {}
+        self._cleaner: asyncio.Task | None = None
+
+    # ── 生命周期 ────────────────────────────────────────────────────────
+    async def initialize(self) -> None:
+        self._cleaner = asyncio.create_task(self._cleanup_loop())
+        logger.info(
+            "[DoubaoPaint] 已启动：painter=%s｜输出=%s｜Timeout=%ss｜读状态=%s",
+            self._painter_script() or "（没找到）",
+            self.image_dir,
+            self.timeout_sec,
+            self.read_state,
+        )
+        logger.info(
+            "[DoubaoPaint] 角色参考图：Q版=%s｜成熟版=%s",
+            self._ref_self(mature=False) or "（没找到）",
+            self._ref_self(mature=True) or "（没找到）",
+        )
+
+    async def terminate(self) -> None:
+        if self._cleaner and not self._cleaner.done():
+            self._cleaner.cancel()
+
+    # ── 路径探测 ────────────────────────────────────────────────────────
+    def _painter_script(self) -> Path | None:
+        base = Path(
+            self.painter_dir
+            or (Path(os.environ.get("USERPROFILE", "~")) / ".dsh" / "plugins" / "dsh-doubao-painter")
+        )
+        for rel in ("tools/paint.mjs", "lib/tools/paint.mjs"):
+            p = base / rel
+            if p.is_file():
+                return p
+        return None
+
+    def _ref_self(self, mature: bool) -> str:
+        """角色设定图：配置优先，否则在 <数据目录>/refs 里按文件名找。"""
+        cfg_path = self.ref_mature_cfg if mature else self.ref_cute_cfg
+        if cfg_path and Path(cfg_path).is_file():
+            return cfg_path
+        want = ("mature", "成熟", "adult", "grown") if mature else ("cute", "q版", "chibi", "小")
+        bad = ("mature", "成熟", "adult", "grown") if not mature else ()
+        for p in sorted(self.ref_dir.glob("*")):
+            if p.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+                continue
+            name = p.name.lower()
+            if bad and any(b in name for b in bad):
+                continue
+            if any(w in name for w in want):
+                return str(p)
+        # 没命名规则就按排序取第一/第二张
+        files = [p for p in sorted(self.ref_dir.glob("*")) if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")]
+        if not files:
+            return ""
+        return str(files[-1] if mature and len(files) > 1 else files[0])
+
+    # ── 记住最近的图（图与需求分开发的情况） ────────────────────────────
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=-210)
+    async def _remember_image(self, event: AstrMessageEvent) -> None:
+        try:
+            for comp in getattr(event.message_obj, "message", []) or []:
+                if type(comp).__name__ != "Image":
+                    continue
+                path = ""
+                for attr in ("path", "file"):
+                    v = str(getattr(comp, attr, "") or "")
+                    if v.startswith("file://"):
+                        v = v[8:]
+                    if v and Path(v).is_file():
+                        path = v
+                        break
+                if not path:
+                    try:
+                        path = await comp.convert_to_file_path()
+                    except Exception:  # noqa: BLE001
+                        path = ""
+                if path and Path(path).is_file():
+                    key = str(event.unified_msg_origin or "")
+                    bucket = self._recent_images.setdefault(key, [])
+                    bucket.append((path, time.time()))
+                    self._recent_images[key] = bucket[-5:]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[DoubaoPaint] 记图片失败：%s", exc)
+
+    def _recent_image(self, event: AstrMessageEvent) -> str:
+        key = str(event.unified_msg_origin or "")
+        cutoff = time.time() - self.recent_minutes * 60
+        for path, ts in reversed(self._recent_images.get(key, [])):
+            if ts >= cutoff and Path(path).is_file():
+                return path
+        return ""
+
+    def _image_in_event(self, event: AstrMessageEvent) -> str:
+        for comp in getattr(event.message_obj, "message", []) or []:
+            if type(comp).__name__ != "Image":
+                continue
+            for attr in ("path", "file"):
+                v = str(getattr(comp, attr, "") or "")
+                if v.startswith("file://"):
+                    v = v[8:]
+                if v and Path(v).is_file():
+                    return v
+        return ""
+
+    # ── 读「她现在的状态」 ──────────────────────────────────────────────
+    def _state_dirs(self) -> list[Path]:
+        if not self.state_plugin:
+            return []
+        data_root = self.data_dir.parent  # <AstrBot>/data/plugin_data
+        d = data_root / self.state_plugin
+        return [d] if d.is_dir() else []
+
+    def _flatten_state(self, obj: Any, prefix: str = "", depth: int = 0) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        if depth > 3:
+            return out
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                key = f"{prefix}.{k}" if prefix else str(k)
+                lk = str(k).lower()
+                if isinstance(v, (str, int, float, bool)):
+                    s = str(v).strip()
+                    if not s or len(s) > 80:
+                        continue
+                    if any(h in lk for h in NOISE_HINTS):
+                        continue
+                    if any(h in lk for h in STATE_HINTS):
+                        out.append((key, s))
+                    elif isinstance(v, bool) and any(h in key.lower() for h in STATE_KEY_DESCEND):
+                        out.append((key, s))
+                elif isinstance(v, (dict, list)):
+                    if any(h in lk for h in STATE_KEY_DESCEND) or depth == 0:
+                        out.extend(self._flatten_state(v, key, depth + 1))
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj[:3]):
+                out.extend(self._flatten_state(v, f"{prefix}[{i}]", depth + 1))
+        return out
+
+    def _state_block(self) -> str:
+        if not self.read_state:
+            return ""
+        lines: list[str] = []
+        for d in self._state_dirs():
+            for name in ("companions.json",):
+                fp = d / name
+                if not fp.is_file():
+                    continue
+                try:
+                    data = json.loads(fp.read_text(encoding="utf-8-sig"))
+                except Exception:  # noqa: BLE001
+                    continue
+                for key, val in self._flatten_state(data)[:60]:
+                    lines.append(f"{key}={val}")
+            if self.state_read_all_files:
+                for fp in list(d.glob("*.json"))[:20]:
+                    if fp.name == "companions.json":
+                        continue
+                    try:
+                        data = json.loads(fp.read_text(encoding="utf-8-sig"))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    for key, val in self._flatten_state(data)[:10]:
+                        lines.append(f"{key}={val}")
+        if not lines:
+            return ""
+        # 去重、截断
+        seen, uniq = set(), []
+        for line in lines:
+            if line in seen:
+                continue
+            seen.add(line)
+            uniq.append(line)
+        text = "；".join(uniq[:24])
+        return text[:600]
+
+    def _now_block(self) -> str:
+        now = datetime.now()
+        return now.strftime("%Y-%m-%d %H:%M")
+
+    # ── 主工具：画图 ────────────────────────────────────────────────────
+    @filter.llm_tool(name="doubao_paint")
+    async def doubao_paint(
+        self,
+        event: AstrMessageEvent,
+        prompt: str,
+        self_portrait: bool = False,
+        with_state: bool = False,
+        mature: bool = False,
+    ) -> str:
+        """用本机「豆包」生成图片，并把图直接发回当前 QQ 会话。
+
+        什么时候用：
+        - 用户说「画一张…」「生成一张…」「来张图」「照这个画」；
+        - 用户让你「画一张你现在的状态 / 画你自己」→ self_portrait=true 且 with_state=true。
+
+        Args:
+            prompt(string): 画面描述（要有主体、风格、构图、光线；中文写）
+            self_portrait(bool): 是不是画「她自己」。true 时用内置角色设定图当参考图，保持形象一致
+            with_state(bool): 是否把此刻的状态/天气写进提示词（配 self_portrait 用得最多）
+            mature(bool): 用成熟版角色图（默认用 Q 版）
+        """
+
+        target = self._painter_script()
+        if target is None:
+            return "画不了：没找到 dsh-doubao-painter 的 tools/paint.mjs（检查 painter_dir 配置）"
+
+        body = (prompt or "").strip()
+        if not body:
+            return "没给画面描述"
+
+        # 1) 参考图：用户消息里的图 > 最近发过的图 > 她的角色图
+        refs: list[str] = []
+        use_self = bool(self_portrait) or any(h in body for h in SELF_HINTS)
+        img_now = self._image_in_event(event)
+        if img_now:
+            # 这条消息里就带图：优先用它当参考图
+            refs.append(img_now)
+        elif not use_self:
+            # 分开发的情况：用最近发过的那张（画她自己时不掺用户的图）
+            cached = self._recent_image(event)
+            if cached:
+                refs.append(cached)
+        if use_self:
+            ref = self._ref_self(mature or any(h in body for h in MATURE_HINTS))
+            if ref:
+                refs.insert(0, ref)
+                body += (
+                    "\n\n参考图是她的固定角色设定（三视图），务必保持形象一致："
+                    "蓝色渐变长发、头顶呆毛、耳侧鲸鳍、深蓝白色女仆裙、身后大鲸尾，Q 版圆润。"
+                )
+        refs = [r for r in dict.fromkeys(refs) if Path(r).is_file()][:3]
+
+        # 2) 状态/天气
+        if with_state or use_self:
+            extra = []
+            state = self._state_block()
+            if state:
+                extra.append("她此刻的状态与天气：" + state)
+            extra.append("现在时间：" + self._now_block())
+            if extra:
+                body += "\n" + "；".join(extra) + "。把状态画进画面里（表情、动作、光线、场景）"
+
+        # 3) 调 painter（一次只能跑一个，加锁）
+        async with self._lock:
+            ok, err, files = await self._run_painter(body, refs)
+        if not ok or not files:
+            logger.warning("[DoubaoPaint] 生成失败：%s", err)
+            return f"画失败了：{err or '没有拿到图片'}"
+
+        out = files[0]
+        if not Path(out).is_file():
+            return "画完了但没找到文件，看看豆包是不是把图存在别处了"
+
+        try:
+            await event.send(MessageChain([Image.fromFileSystem(out)]))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DoubaoPaint] 发图失败：%s", exc)
+            return f"画好了，但发图失败：{exc}"
+
+        return "画好了，图已经发给你了"
+
+    async def _run_painter(self, prompt: str, refs: list[str]) -> tuple[bool, str, list[str]]:
+        script = self._painter_script()
+        if script is None:
+            return False, "没找到 paint.mjs", []
+        payload: dict[str, Any] = {
+            "prompt": prompt,
+            "outDir": str(self.image_dir),
+            "timeoutMs": self.timeout_sec * 1000,
+            "cdpPort": self.cdp_port,
+            "newChat": True,
+        }
+        if refs:
+            payload["refImages"] = refs
+        if self.app_exe:
+            payload["appExe"] = self.app_exe
+        cmd = [self.node_path, str(script), "--stdin-json", "--json"]
+        kwargs: dict[str, Any] = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **kwargs,
+            )
+            out_b, err_b = await asyncio.wait_for(
+                proc.communicate(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
+                timeout=self.timeout_sec + 30,
+            )
+        except asyncio.TimeoutError:
+            return False, f"超时（>{self.timeout_sec}s）", []
+        except FileNotFoundError:
+            return False, f"找不到 node（{self.node_path}）", []
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc), []
+
+        text = (out_b or b"").decode("utf-8", "ignore").strip()
+        err = (err_b or b"").decode("utf-8", "ignore").strip()
+        # paint.mjs 的 --json 是「美化过」的多行 JSON，不能按行解析
+        data = None
+        try:
+            data = json.loads(text)
+        except Exception:  # noqa: BLE001
+            start, end = text.find("{"), text.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    data = json.loads(text[start : end + 1])
+                except Exception:  # noqa: BLE001
+                    data = None
+        if not data:
+            return False, (err or text)[-300:], []
+        if not data.get("ok"):
+            return False, str(data.get("error") or err)[-300:], []
+        files = [str(f) for f in (data.get("files") or []) if f]
+        if not files and data.get("items"):
+            files = [f for it in data["items"] for f in (it.get("files") or [])]
+        return True, "", files
+
+    # ── 自检工具 ────────────────────────────────────────────────────────
+    @filter.llm_tool(name="doubao_paint_status")
+    async def doubao_paint_status(self, event: AstrMessageEvent) -> str:
+        """检查豆包画画能不能用：painter 脚本、node、豆包是否在调试端口上。"""
+
+        script = self._painter_script()
+        lines = [
+            f"painter 脚本：{script or '❌ 没找到'}",
+            f"node：{self.node_path}",
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.node_path, "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            lines.append("node 版本：" + (out_b or b"").decode("utf-8", "ignore").strip())
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"node 不可用：{exc}")
+
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", self.cdp_port), timeout=3
+            )
+            writer.close()
+            lines.append(f"豆包 CDP {self.cdp_port}：✅ 在跑")
+        except Exception:  # noqa: BLE001
+            lines.append(f"豆包 CDP {self.cdp_port}：❌ 没在跑（第一次画图时会自动拉起来）")
+
+        lines.append(f"角色图：Q版={self._ref_self(False) or '❌'}｜成熟={self._ref_self(True) or '❌'}")
+        state = self._state_block()
+        lines.append("状态读取：" + (state[:120] if state else "（没读到，或 read_state 关了）"))
+        return "\n".join(lines)
+
+    # ── 清理旧图 ────────────────────────────────────────────────────────
+    async def _cleanup_loop(self) -> None:
+        await asyncio.sleep(60)
+        while True:
+            try:
+                cutoff = time.time() - self.keep_days * 86400
+                for p in self.image_dir.glob("*"):
+                    if p.is_file() and p.stat().st_mtime < cutoff:
+                        p.unlink(missing_ok=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[DoubaoPaint] 清理失败：%s", exc)
+            await asyncio.sleep(3600)

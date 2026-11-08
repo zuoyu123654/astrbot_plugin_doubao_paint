@@ -1,0 +1,41 @@
+name: astrbot_plugin_doubao_paint
+logo: ./logo.png
+display_name: 豆包画画
+short_desc: 让她用本机「豆包」出图，画完直接把图发回 QQ；支持图生图、她自己的形象、按当前状态画
+desc: >-
+  【前置】
+  1. 本机装了「豆包」桌面客户端，并且**已登录**（生图用的是它的免费额度）。
+  2. 装了 DSH 插件 `dsh-doubao-painter`（https://github.com/zuoyu123654/dsh-doubao-painter 或本机
+     `~/.dsh/plugins/dsh-doubao-painter`），它负责用 CDP 驱动豆包出图、拿无水印原图。
+  3. 本机有 `node`（>= 22）。
+
+  【功能】
+  1. 一句「画一张……」→ 她自己调 `doubao_paint`，豆包出图，图直接发回当前 QQ 会话。
+  2. **图生图**：图和需求一起发，用消息里那张图当参考图；先发图、隔一会儿再说「照这个画」，
+     插件记住最近 30 分钟发过的图，照样能用。
+  3. **她自己的形象**：内置两张角色设定图（Q 版 / 成熟版），说「画一张你现在的状态」时用角色图当参考图，
+     保持发型、鲸鳍、女仆裙、鲸尾一致。
+  4. **按状态画**：只读 `astrbot_plugin_private_companion` 里此刻的情绪/精力/天气，
+     写进给豆包的提示词——她画出来的就是「现在的她」。
+  5. 自检工具 `doubao_paint_status`：查 painter 脚本、node、豆包调试端口、参考图、状态读取。
+
+  【怎么用】
+  装好前置后，把这句话发给你的 AI：
+
+  「请帮我配置好 AstrBot 里的【豆包画画】插件，并验证是否可用。」
+
+  AI 会按 SETUP-FOR-AI.md 检查 node/豆包/painter、填好路径、放好角色参考图，
+  最后真画一张验证链路。
+
+version: 0.1.0
+author: paopao
+repo: https://github.com/zuoyu123654/astrbot_plugin_doubao_paint
+astrbot_version: ">=4.17.0"
+support_platforms:
+  - aiocqhttp
+tags:
+  - 豆包
+  - 生图
+  - 画图
+  - 图生图
+  - 自画像
