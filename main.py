@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.1.2"
+PLUGIN_VERSION = "0.1.3"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -228,17 +228,19 @@ class DoubaoPaintPlugin(Star):
             self_ref = self._ref_self(bool(task.get("mature")))
             if self_ref:
                 refs.insert(0, self_ref)
-        body = prompt
+        if task.get("self_portrait"):
+            head = [self._constraint_block()]
+            state = self._state_block()
+            if state:
+                head.append("【她此刻的状态】" + state + "。把这些画进表情、动作、场景里。")
+            body = "\n\n".join(head) + "\n\n【画面】" + prompt
+        else:
+            body = prompt
         if self_ref:
             body += (
                 "\n\n参考图是她的固定角色设定（三视图），务必保持形象一致："
                 "蓝色渐变长发、头顶呆毛、耳侧鲸鳍、深蓝白色女仆裙、身后大鲸尾，Q 版圆润。"
             )
-        if task.get("with_state") or task.get("self_portrait"):
-            state = self._state_block()
-            if state:
-                body += "\n她此刻的状态与天气：" + state
-            body += "\n现在时间：" + self._now_block()
         async with self._lock:
             ok, err, files = await self._run_painter(body, refs)
         if not ok or not files:
@@ -311,46 +313,129 @@ class DoubaoPaintPlugin(Star):
                 out.extend(self._flatten_state(v, f"{prefix}[{i}]", depth + 1))
         return out
 
-    def _state_block(self) -> str:
-        if not self.read_state:
-            return ""
-        lines: list[str] = []
+    def _load_companions(self) -> dict | None:
         for d in self._state_dirs():
-            for name in ("companions.json",):
-                fp = d / name
-                if not fp.is_file():
-                    continue
+            fp = d / "companions.json"
+            if fp.is_file():
                 try:
                     data = json.loads(fp.read_text(encoding="utf-8-sig"))
                 except Exception:  # noqa: BLE001
                     continue
-                for key, val in self._flatten_state(data)[:60]:
-                    lines.append(f"{key}={val}")
-            if self.state_read_all_files:
-                for fp in list(d.glob("*.json"))[:20]:
-                    if fp.name == "companions.json":
-                        continue
-                    try:
-                        data = json.loads(fp.read_text(encoding="utf-8-sig"))
-                    except Exception:  # noqa: BLE001
-                        continue
-                    for key, val in self._flatten_state(data)[:10]:
-                        lines.append(f"{key}={val}")
-        if not lines:
-            return ""
-        # 去重、截断
-        seen, uniq = set(), []
-        for line in lines:
-            if line in seen:
+                if isinstance(data, dict):
+                    return data
+        return None
+
+    def _weather_text(self, ds: dict, dw: dict) -> str:
+        """取真实天气；「暂无天气信息」这类占位一律当没有。"""
+
+        for raw in (dw.get("prompt"), ds.get("weather")):
+            text = str(raw or "").strip()
+            if not text:
                 continue
-            seen.add(line)
-            uniq.append(line)
-        text = "；".join(uniq[:24])
-        return text[:600]
+            low = text.lower()
+            if "暂无" in text or "unknown" in low or low in ("none", "null"):
+                continue
+            return text
+        return ""
+
+    @staticmethod
+    def _daypart(hour: int) -> str:
+        if 5 <= hour < 9:
+            return "清晨"
+        if 9 <= hour < 12:
+            return "上午"
+        if 12 <= hour < 14:
+            return "中午"
+        if 14 <= hour < 17:
+            return "下午"
+        if 17 <= hour < 19:
+            return "傍晚"
+        if 19 <= hour < 23:
+            return "晚上"
+        return "深夜"
 
     def _now_block(self) -> str:
         now = datetime.now()
-        return now.strftime("%Y-%m-%d %H:%M")
+        return f"{now.strftime('%Y-%m-%d %H:%M')}（{self._daypart(now.hour)}）"
+
+    def _situation_block(self) -> str:
+        now = datetime.now()
+        weather = ""
+        data = self._load_companions() or {}
+        ds = data.get("daily_state") if isinstance(data.get("daily_state"), dict) else {}
+        dw = data.get("daily_weather") if isinstance(data.get("daily_weather"), dict) else {}
+        weather = self._weather_text(ds, dw)
+        line = f"现在是 {now.strftime('%Y-%m-%d %H:%M')}（{self._daypart(now.hour)}）"
+        line += f"；天气：{weather}" if weather else "；天气未知（不要自己编天气）"
+        return line
+
+    def _constraint_block(self) -> str:
+        """放在提示词最前面的硬性前提：时间/天气必须先对上。"""
+
+        now = datetime.now()
+        if 5 <= now.hour < 19:
+            light = (
+                "现在是白天，画面必须有白天的自然光（窗外/天空是亮的），"
+                "绝对不能画成夜晚、深夜或者黑漆漆的室内。"
+            )
+        else:
+            light = "现在是夜里，画面可以是夜色或室内灯光，但别画成大中午。"
+        return (
+            "【硬性前提·必须准确】" + self._situation_block() + "。"
+            + light
+            + "天气写了晴/雨/雪/阴，天空和地面要跟着对上；没写就别自己加雨雪。"
+        )
+
+    def _state_block(self) -> str:
+        """把她此刻的状态翻成人话（不要给豆包看 key=value）。"""
+
+        if not self.read_state:
+            return ""
+        data = self._load_companions()
+        if not data:
+            return ""
+        ds = data.get("daily_state") if isinstance(data.get("daily_state"), dict) else {}
+        dw = data.get("daily_weather") if isinstance(data.get("daily_weather"), dict) else {}
+
+        bits: list[str] = []
+        mood = str(ds.get("mood_bias") or "").strip()
+        moods: list[str] = []
+        conds = ds.get("conditions")
+        if isinstance(conds, list):
+            for c in conds:
+                if isinstance(c, dict):
+                    m = str(c.get("mood") or "").strip()
+                    if m and m not in moods:
+                        moods.append(m)
+        names = [x for x in dict.fromkeys([mood] + moods) if x]
+        if names:
+            bits.append("心情：" + "、".join(names))
+        energy = ds.get("energy")
+        if isinstance(energy, (int, float)):
+            bits.append(f"精力 {int(energy)}/100")
+        # 状态快照可能是前几天的：过期的「睡眠」和当下时间会打架，就不带了
+        state_date = str(ds.get("date") or "").strip()
+        fresh = state_date == datetime.now().strftime("%Y-%m-%d")
+        sleep = str(ds.get("sleep") or "").strip()
+        if sleep and fresh:
+            bits.append("睡眠：" + sleep)
+        body = "，".join(
+            x
+            for x in (
+                str(ds.get("health") or "").strip(),
+                str(ds.get("body_cycle") or "").strip(),
+            )
+            if x
+        )
+        if body:
+            bits.append("身体：" + body)
+        weather = self._weather_text(ds, dw)
+        if weather:
+            bits.append("天气：" + weather)
+        dream = str(ds.get("dream") or "").strip().rstrip("。.,，;；")
+        if dream:
+            bits.append("最近的梦：" + (dream[:50] + "…" if len(dream) > 50 else dream))
+        return "；".join(bits)
 
     # ── 主工具：画图 ────────────────────────────────────────────────────
     @filter.llm_tool(name="doubao_paint")
@@ -421,15 +506,13 @@ class DoubaoPaintPlugin(Star):
             logger.info("[DoubaoPaint] 先记下需求，等用户发图：%s", body[:40])
             return f"好，把图发来，我照它画（{self.pending_minutes} 分钟内有效）"
 
-        # 2) 状态/天气
-        if with_state or use_self:
-            extra = []
+        # 2) 只有「画她自己 / 她现在的状态」才加时间+天气+状态；普通画图不掺这些
+        if use_self:
+            head = [self._constraint_block()]
             state = self._state_block()
             if state:
-                extra.append("她此刻的状态与天气：" + state)
-            extra.append("现在时间：" + self._now_block())
-            if extra:
-                body += "\n" + "；".join(extra) + "。把状态画进画面里（表情、动作、光线、场景）"
+                head.append("【她此刻的状态】" + state + "。把这些画进表情、动作、场景里。")
+            body = "\n\n".join(head) + "\n\n【画面】" + body
 
         # 3) 调 painter（一次只能跑一个，加锁）
         async with self._lock:
