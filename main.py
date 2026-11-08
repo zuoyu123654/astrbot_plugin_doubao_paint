@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.3.3"
+PLUGIN_VERSION = "0.3.4"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -277,6 +277,9 @@ class DoubaoPaintPlugin(Star):
             state = self._state_block()
             if state:
                 head.append("【她此刻的状态】" + state + "。把这些画进表情、动作、场景里。")
+            scene = self._now_scene()
+            if scene:
+                head.append("【她此刻在做】" + scene + "。画面就从这里来。")
             body = "\n\n".join(head) + "\n\n【画面】" + prompt
         else:
             body = prompt
@@ -486,36 +489,51 @@ class DoubaoPaintPlugin(Star):
         "深夜": "很晚了，安静、光线很弱，只有室内弱光",
     }
 
+    def _now_scene(self) -> str:
+        """从陪伴插件里拼一句「此刻在干嘛」，拼不出来就空着。"""
+
+        data = self._load_companions() or {}
+        bits: list[str] = []
+        try:
+            users = data.get("users") or {}
+            u = next(iter(users.values())) if isinstance(users, dict) and users else {}
+            label = str(((u.get("current_interaction") or {}).get("label")) or "").strip()
+            if label:
+                bits.append(f"互动状态：{label}")
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 最近 36 小时内记录过的活动才算「现在」
+        try:
+            acts = data.get("observed_activities") or []
+            if isinstance(acts, list) and acts:
+                last = acts[-1]
+                end_at = str(last.get("end_at") or last.get("start_at") or "")
+                title = str(last.get("title") or "").strip()
+                if title and end_at:
+                    stamp = datetime.fromisoformat(end_at)
+                    if (datetime.now(stamp.tzinfo) - stamp).total_seconds() < 36 * 3600:
+                        bits.append(f"刚在做：{title}")
+        except Exception:  # noqa: BLE001
+            pass
+        return "；".join(bits)
+
     def _constraint_block(self, now: datetime | None = None) -> str:
-        """放在提示词最前面的硬性前提：时间/天气必须先对上，光线按「现在这个时段」写。"""
+        """放在提示词最前面的硬性前提：给时间 + 天气，具体怎么画交给豆包。"""
 
         now = now or datetime.now()
         band = self._daypart(now.hour)
-        weather = ""
         data = self._load_companions() or {}
         ds = data.get("daily_state") if isinstance(data.get("daily_state"), dict) else {}
         dw = data.get("daily_weather") if isinstance(data.get("daily_weather"), dict) else {}
         weather = self._weather_text(ds, dw)
 
-        head = f"【硬性前提·必须准确】现在是 {now.strftime('%Y-%m-%d %H:%M')}（{band}）"
-        head += f"；天气：{weather}。" if weather else "；天气未知（不要自己编天气）。"
-
-        light = self.LIGHT_BY_BAND.get(band, "光线和当前时间要对得上")
-        body = f"现在的光应该是：{light}。"
-
-        if any(w in (weather or "") for w in ("阴", "雨", "雪", "雾", "霾", "雷")):
-            body += "天气是阴雨/雾雪，别画直射阳光和清晰影子，光要柔、偏灰。"
-        elif any(w in (weather or "") for w in ("多云", "云")):
-            body += "多云：阳光要透过云层，光是散的，别画刺眼的直射光。"
-        elif weather:
-            body += f"天气写的是「{weather}」，天空和地面要跟着对上，别自己加雨雪。"
-        else:
-            body += "没写天气，就别自己加雨雪、也别画大晴天。"
-
-        if band in ("傍晚", "晚上", "深夜", "凌晨"):
-            body += "不要画成中午那种强烈日光。"
-        elif band in ("上午", "中午", "下午"):
-            body += "不要画成夜晚、深夜或者黑漆漆的室内。"
+        head = f"【现在的时间与天气】{now.strftime('%Y-%m-%d %H:%M')}（{band}）"
+        head += f"；天气：{weather}。" if weather else "；天气未知（别自己编天气）。"
+        body = (
+            "画面的光线、天空、地面和氛围都要跟这个时间和天气对得上，具体怎么画你自己发挥；"
+            "但别画成别的时段（比如傍晚别画成正午大太阳、白天别画成深夜），也别凭空加雨雪。"
+        )
         return head + body
 
     def _state_block(self) -> str:
@@ -561,12 +579,6 @@ class DoubaoPaintPlugin(Star):
         )
         if body:
             bits.append("身体：" + body)
-        weather = self._weather_text(ds, dw)
-        if weather:
-            bits.append("天气：" + weather)
-        dream = str(ds.get("dream") or "").strip().rstrip("。.,，;；")
-        if dream:
-            bits.append("最近的梦：" + (dream[:50] + "…" if len(dream) > 50 else dream))
         text = "；".join(bits)
         if bits and state_date and not fresh:
             text = f"（上次记录 {state_date}）" + text
@@ -649,6 +661,9 @@ class DoubaoPaintPlugin(Star):
             state = self._state_block()
             if state:
                 head.append("【她此刻的状态】" + state + "。把这些画进表情、动作、场景里。")
+            scene = self._now_scene()
+            if scene:
+                head.append("【她此刻在做】" + scene + "。画面就从这里来。")
             body = "\n\n".join(head) + "\n\n【画面】" + body
 
         # 3) 调 painter（一次只能跑一个，加锁）
