@@ -189,7 +189,7 @@ class DoubaoPaintPlugin(Star):
     def _self_appearance_text(self, has_ref: bool) -> str:
         """给画/不给参考图时，用来锁住她形象的说明。"""
 
-        base = self.self_appearance or (
+        base = getattr(self, "self_appearance", "") or (
             "蓝色渐变长发（发梢浅蓝）、头顶一根呆毛、耳侧是薄片状鲸鳍、蓝色圆眼、"
             "深蓝白色女仆长裙配白围裙（围裙上有小鲸鱼）、身后一条大鲸尾，Q 版圆润"
         )
