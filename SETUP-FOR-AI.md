@@ -239,7 +239,7 @@
 ## 6.4 她自己想画就画（可选）
 
 - 默认允许：她聊天时想画就能画一张发过去（`allow_self_initiated: true`）。
-- 冷却 `self_initiated_cooldown_minutes`（默认 20 分钟），防止刷屏。
+- 冷却 `self_initiated_cooldown_minutes`（默认 30 分钟），防止刷屏。
 - 注意：这依赖「她正在跟用户对话」这一轮；陪伴插件的**主动消息**不一定带工具，
   所以主动消息里不一定画得出来。
 - 不想让她自己画：`allow_self_initiated: false`。

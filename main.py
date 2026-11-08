@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.5.1"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -138,10 +138,10 @@ class DoubaoPaintPlugin(Star):
         self.allow_self_initiated = bool(cfg.get("allow_self_initiated", True))
         try:
             self.self_initiated_cooldown = max(
-                0, int(cfg.get("self_initiated_cooldown_minutes", 20) or 0)
+                0, int(cfg.get("self_initiated_cooldown_minutes", 30) or 0)
             )
         except (TypeError, ValueError):
-            self.self_initiated_cooldown = 20
+            self.self_initiated_cooldown = 30
         self._last_self_draw = 0.0
 
         self.read_state = bool(cfg.get("read_state", True))

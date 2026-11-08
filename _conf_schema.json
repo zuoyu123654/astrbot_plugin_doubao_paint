@@ -21,8 +21,8 @@
   },
   "self_initiated_cooldown_minutes": {
     "type": "int",
-    "description": "她自己主动画的冷却（分钟），防止刷屏。0 = 不限制。",
-    "default": 20
+    "description": "她自己主动画的冷却（分钟，默认 30），防止刷屏和吃光豆包免费额度。0 = 不限制。",
+    "default": 30
   },
   "allowed_users": {
     "type": "list",

@@ -89,7 +89,7 @@
 她可以直接画一张发过来，不用你先说「画一张」。
 
 - `allow_self_initiated`（默认 true）：开/关这个能力。
-- `self_initiated_cooldown_minutes`（默认 20）：她自己主动画的冷却，防刷屏；0 = 不限制。
+- `self_initiated_cooldown_minutes`（默认 30）：她自己主动画的冷却，防刷屏；0 = 不限制。
 - 你明确要求画的（"画一只猫"）**不受冷却影响**。
 
 ## 权限（默认只有主人能用）
