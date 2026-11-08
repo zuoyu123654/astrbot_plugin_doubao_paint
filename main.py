@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.3.8"
+PLUGIN_VERSION = "0.4.0"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -114,6 +114,17 @@ class DoubaoPaintPlugin(Star):
             self.image_count = 1
         self.use_edits = bool(cfg.get("use_edits", True))
 
+        # 谁能用：owner（只有主人，默认）/ whitelist（主人 + 白名单）/ everyone
+        self.access_mode = str(cfg.get("access_mode", "owner") or "owner").strip().lower()
+        if self.access_mode not in ("owner", "whitelist", "everyone"):
+            self.access_mode = "owner"
+        raw_users = cfg.get("allowed_users") or []
+        if isinstance(raw_users, str):
+            raw_users = raw_users.replace("，", ",").split(",")
+        self.allowed_users = {
+            str(u).strip() for u in raw_users if str(u).strip()
+        } if isinstance(raw_users, (list, tuple, set)) else set()
+
         self.read_state = bool(cfg.get("read_state", True))
         self.state_plugin = str(cfg.get("state_plugin", "astrbot_plugin_private_companion") or "").strip()
         self.state_read_all_files = bool(cfg.get("state_read_all_files", False))
@@ -156,6 +167,47 @@ class DoubaoPaintPlugin(Star):
     async def terminate(self) -> None:
         if self._cleaner and not self._cleaner.done():
             self._cleaner.cancel()
+
+    # ── 权限 ────────────────────────────────────────────────────────────
+    def _owner_ids(self) -> set[str]:
+        """主人名单：AstrBot 的 cmd_config.json 里的 admins_id（缓存 60 秒）。"""
+
+        now = time.time()
+        cached = getattr(self, "_owner_cache", None)
+        if cached and now - cached[0] < 60:
+            return cached[1]
+        ids: set[str] = set()
+        try:
+            cfg_path = self.data_dir.parent.parent / "cmd_config.json"
+            data = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+            value = data.get("admins_id")
+            if isinstance(value, list):
+                ids = {str(x).strip() for x in value if str(x).strip()}
+        except Exception:  # noqa: BLE001
+            pass
+        self._owner_cache = (now, ids)
+        return ids
+
+    def _can_use(self, event: AstrMessageEvent) -> bool:
+        if self.access_mode == "everyone":
+            return True
+        try:
+            uid = str(event.get_sender_id() or "").strip()
+        except Exception:  # noqa: BLE001
+            uid = ""
+        if uid:
+            if uid in self._owner_ids():
+                return True
+            if self.access_mode == "whitelist" and uid in self.allowed_users:
+                return True
+        try:
+            if event.is_admin():
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+    DENY_TEXT = "这个只给老大用，你别乱点。"
 
     # ── 路径探测 ────────────────────────────────────────────────────────
     def _painter_script(self) -> Path | None:
@@ -747,6 +799,9 @@ class DoubaoPaintPlugin(Star):
 
         # 1) 参考图：用户消息里的图 > 最近发过的图 > 她的角色图
         refs: list[str] = []
+        if not self._can_use(event):
+            return self.DENY_TEXT
+
         use_self = bool(self_portrait) or any(h in body for h in SELF_HINTS)
         img_now = self._image_in_event(event)
         if img_now:
@@ -979,6 +1034,9 @@ class DoubaoPaintPlugin(Star):
         用户说「画一张你现在的状态」时，先调这个，然后**由你根据这些线索写一段具体的画面描述**，
         再调 doubao_paint(self_portrait=true, prompt=你写的那段)。
         """
+        if not self._can_use(event):
+            return self.DENY_TEXT
+
 
         return self._now_playing_text() or "（没读到她的活动，按当前时间和心情自己写一段吧）"
 
@@ -988,6 +1046,9 @@ class DoubaoPaintPlugin(Star):
 
         文件名就是说明（括号里的也算），例如「默认（Q版可爱 女仆装）」「成熟（长大）」。
         """
+        if not self._can_use(event):
+            return self.DENY_TEXT
+
 
         files = self._ref_files()
         if not files:
@@ -1006,6 +1067,9 @@ class DoubaoPaintPlugin(Star):
     @filter.llm_tool(name="doubao_paint_status")
     async def doubao_paint_status(self, event: AstrMessageEvent) -> str:
         """检查豆包画画能不能用：painter 脚本、node、豆包是否在调试端口上。"""
+        if not self._can_use(event):
+            return self.DENY_TEXT
+
 
         script = self._painter_script()
         lines = [

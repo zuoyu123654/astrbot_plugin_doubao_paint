@@ -9,6 +9,16 @@
     "description": "生图后端：doubao（本机豆包，默认）/ openai（任意 OpenAI 兼容的 /images/generations 接口）。",
     "default": "doubao"
   },
+  "access_mode": {
+    "type": "string",
+    "description": "谁能用：owner（只有主人=cmd_config.json 的 admins_id，默认）/ whitelist（主人+allowed_users）/ everyone（所有人）。",
+    "default": "owner"
+  },
+  "allowed_users": {
+    "type": "list",
+    "description": "access_mode=whitelist 时额外允许的 QQ 号列表。",
+    "default": []
+  },
   "api_base": {
     "type": "string",
     "description": "OpenAI 兼容接口的 base（含 /v1），例如 https://api.openai.com/v1、https://api.siliconflow.cn/v1。image_backend=openai 时必填。",

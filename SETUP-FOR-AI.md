@@ -97,7 +97,9 @@
   "state_read_all_files": false,
   "self_ref_cute": "",
   "self_ref_mature": "",
-  "self_appearance": ""
+  "self_appearance": "",
+  "access_mode": "owner",
+  "allowed_users": []
 }
 ```
 
@@ -233,6 +235,13 @@
   读不到就用旧的 `daily_plan`，再没有就只给时间+心情。
 - 画她自己时，先调 `doubao_now_playing` 拿到「今日上演」，**由你写一段具体画面描述**，
   再调 `doubao_paint(self_portrait=true, prompt=你写的那段)`。
+
+## 6.5 权限（默认锁给主人）
+
+- 默认 `access_mode: "owner"`：只有 `data/cmd_config.json` 里 `admins_id` 的人（以及平台 `role=admin`）能用；
+  别人触发时她只回「这个只给老大用，你别乱点。」。
+- 要放开：`whitelist` + `allowed_users: ["QQ号"]`；或 `everyone`（谁都能画，慎用）。
+- 配完记得跟使用者确认一句：「默认只有你能用，别人要画需要你自己加白名单。」
 
 ## 7. 排查表
 

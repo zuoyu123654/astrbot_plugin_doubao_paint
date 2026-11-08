@@ -83,6 +83,20 @@
 
 ---
 
+## 权限（默认只有主人能用）
+
+`access_mode` 三档：
+
+| 值 | 谁能触发 |
+| --- | --- |
+| `owner`（默认） | 只有主人——`data/cmd_config.json` 里 `admins_id` 那几个 QQ 号，外加平台里 `role=admin` 的人 |
+| `whitelist` | 主人 + `allowed_users` 列表里的人 |
+| `everyone` | 所有人都能 |
+
+- 控制的是这套工具：`doubao_paint` / `doubao_paint_status` / `doubao_list_refs` / `doubao_now_playing`。
+- 被拦下时她只回一句「这个只给老大用，你别乱点。」，不会画、也不暴露路径。
+- 想加人：`"access_mode": "whitelist"`, `"allowed_users": ["10086"]`。
+
 ## 换成别的生图接口（不用豆包也行）
 
 `image_backend` 换成 `openai`，就能接**任何 OpenAI 兼容**的 `/images/generations` 接口
