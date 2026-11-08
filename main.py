@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.2.1"
+PLUGIN_VERSION = "0.3.0"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -149,11 +149,7 @@ class DoubaoPaintPlugin(Star):
             self.timeout_sec,
             self.read_state,
         )
-        logger.info(
-            "[DoubaoPaint] 角色参考图：Q版=%s｜成熟版=%s",
-            self._ref_self(mature=False) or "（没找到）",
-            self._ref_self(mature=True) or "（没找到）",
-        )
+        logger.info("[DoubaoPaint] 角色参考图（按文件名挑）：%s", self._ref_list_text())
 
     async def terminate(self) -> None:
         if self._cleaner and not self._cleaner.done():
@@ -171,26 +167,55 @@ class DoubaoPaintPlugin(Star):
                 return p
         return None
 
-    def _ref_self(self, mature: bool) -> str:
-        """角色设定图：配置优先，否则在 <数据目录>/refs 里按文件名找。"""
-        cfg_path = self.ref_mature_cfg if mature else self.ref_cute_cfg
-        if cfg_path and Path(cfg_path).is_file():
-            return cfg_path
-        want = ("mature", "成熟", "adult", "grown") if mature else ("cute", "q版", "chibi", "小")
-        bad = ("mature", "成熟", "adult", "grown") if not mature else ()
-        for p in sorted(self.ref_dir.glob("*")):
-            if p.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
-                continue
-            name = p.name.lower()
-            if bad and any(b in name for b in bad):
-                continue
-            if any(w in name for w in want):
+    def _ref_files(self) -> list[Path]:
+        exts = (".png", ".jpg", ".jpeg", ".webp")
+        return [p for p in sorted(self.ref_dir.glob("*")) if p.suffix.lower() in exts]
+
+    def _ref_default(self) -> str:
+        files = self._ref_files()
+        for p in files:
+            if "默认" in p.stem or "default" in p.stem.lower():
                 return str(p)
-        # 没命名规则就按排序取第一/第二张
-        files = [p for p in sorted(self.ref_dir.glob("*")) if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")]
+        return str(files[0]) if files else ""
+
+    def _ref_list_text(self) -> str:
+        files = self._ref_files()
+        if not files:
+            return "（refs 目录是空的，没有参考图）"
+        return "、".join(p.stem for p in files)
+
+    def _self_appearance_text(self, has_ref: bool) -> str:
+        """给画/不给参考图时，用来锁住她形象的说明。"""
+
+        base = (
+            "蓝色渐变长发（发梢浅蓝）、头顶一根呆毛、耳侧是薄片状鲸鳍、蓝色圆眼、"
+            "深蓝白色女仆长裙配白围裙（围裙上有小鲸鱼）、身后一条大鲸尾，Q 版圆润"
+        )
+        if has_ref:
+            return f"参考图是她的固定角色设定（三视图），务必保持形象一致：{base}。"
+        return (
+            "这次没有参考图，请严格按她的固定形象画（不要画成别人）："
+            f"{base}，身高约 1.45 米，抱起来软乎乎有分量。"
+        )
+
+    def _pick_ref(self, keyword: str, prompt: str) -> str:
+        """按文件名挑参考图：先看显式指定的词，再看用户话里提到的名字，最后用「默认」。
+
+        文件名里的括号说明也算名字的一部分（例如「默认（Q版可爱 女仆装）」）。
+        """
+
+        files = self._ref_files()
         if not files:
             return ""
-        return str(files[-1] if mature and len(files) > 1 else files[0])
+        kw = str(keyword or "").strip()
+        if kw:
+            for p in files:
+                if kw in p.stem or kw.lower() in p.stem.lower():
+                    return str(p)
+        for p in files:
+            if p.stem and p.stem in (prompt or ""):
+                return str(p)
+        return self._ref_default()
 
     # ── 记住最近的图（图与需求分开发的情况） ────────────────────────────
     @filter.event_message_type(filter.EventMessageType.ALL, priority=-210)
@@ -239,7 +264,10 @@ class DoubaoPaintPlugin(Star):
         refs = [image_path]
         self_ref = ""
         if task.get("self_portrait"):
-            self_ref = self._ref_self(bool(task.get("mature")))
+            self_ref = self._pick_ref(
+                str(task.get("reference") or ("成熟" if task.get("mature") else "")),
+                prompt,
+            )
             if self_ref:
                 refs.insert(0, self_ref)
         if task.get("self_portrait"):
@@ -251,10 +279,7 @@ class DoubaoPaintPlugin(Star):
         else:
             body = prompt
         if self_ref:
-            body += (
-                "\n\n参考图是她的固定角色设定（三视图），务必保持形象一致："
-                "蓝色渐变长发、头顶呆毛、耳侧鲸鳍、深蓝白色女仆裙、身后大鲸尾，Q 版圆润。"
-            )
+            body += "\n\n" + self._self_appearance_text(True)
         async with self._lock:
             ok, err, files = await self._generate(body, refs)
         if not ok or not files:
@@ -524,6 +549,7 @@ class DoubaoPaintPlugin(Star):
         prompt: str,
         self_portrait: bool = False,
         with_state: bool = False,
+        reference: str = "",
         mature: bool = False,
     ) -> str:
         """用本机「豆包」生成图片，并把图直接发回当前 QQ 会话。
@@ -531,12 +557,15 @@ class DoubaoPaintPlugin(Star):
         什么时候用：
         - 用户说「画一张…」「生成一张…」「来张图」「照这个画」；
         - 用户让你「画一张你现在的状态 / 画你自己」→ self_portrait=true 且 with_state=true。
+          画她自己之前，可以先调 `doubao_list_refs` 看有哪些角色参考图，挑名字最合适的填 reference。
 
         Args:
             prompt(string): 画面描述（要有主体、风格、构图、光线；中文写）
             self_portrait(bool): 是不是画「她自己」。true 时用内置角色设定图当参考图，保持形象一致
             with_state(bool): 是否把此刻的状态/天气写进提示词（配 self_portrait 用得最多）
-            mature(bool): 用成熟版角色图（默认用 Q 版）
+            reference(string): 用哪张参考图，填文件名里的关键词（例如「成熟」「女仆装」「默认」；
+                括号里的说明也算，比如「默认（Q版可爱 女仆装）」可以填「女仆装」）。
+                留空 = 自动挑：先看话里有没有提到文件名，没有就用「默认」那张。
         """
 
         target = self._painter_script()
@@ -560,14 +589,11 @@ class DoubaoPaintPlugin(Star):
             if cached:
                 refs.append(cached)
         if use_self:
-            ref = self._ref_self(mature or any(h in body for h in MATURE_HINTS))
+            ref = self._pick_ref(reference or ("成熟" if mature else ""), body)
             if ref:
                 refs.insert(0, ref)
-                body += (
-                    "\n\n参考图是她的固定角色设定（三视图），务必保持形象一致："
-                    "蓝色渐变长发、头顶呆毛、耳侧鲸鳍、深蓝白色女仆裙、身后大鲸尾，Q 版圆润。"
-                )
-        refs = [r for r in dict.fromkeys(refs) if Path(r).is_file()][:3]
+                body += "\n\n" + self._self_appearance_text(bool(ref))
+        refs = [r for r in dict.fromkeys(refs) if Path(r).is_file()]
 
         # 先发需求、后发图：需求里明显要「参考一张图」，但这会儿还没有图
         if not refs and not use_self and self.auto_paint_next_image and any(
@@ -579,6 +605,7 @@ class DoubaoPaintPlugin(Star):
                 "umo": umo,
                 "self_portrait": bool(self_portrait),
                 "with_state": bool(with_state),
+                "reference": str(reference or ""),
                 "mature": bool(mature),
                 "ts": time.time(),
             }
@@ -776,6 +803,26 @@ class DoubaoPaintPlugin(Star):
             files = [f for it in data["items"] for f in (it.get("files") or [])]
         return True, "", files
 
+    @filter.llm_tool(name="doubao_list_refs")
+    async def doubao_list_refs(self, event: AstrMessageEvent) -> str:
+        """列出可用的角色参考图。画她自己之前先看一眼，挑名字最合适的那张。
+
+        文件名就是说明（括号里的也算），例如「默认（Q版可爱 女仆装）」「成熟（长大）」。
+        """
+
+        files = self._ref_files()
+        if not files:
+            return "refs 目录是空的：没有参考图，画她自己时只能用文字描述她的样子。"
+        default = self._ref_default()
+        default_name = Path(default).stem if default else ""
+        lines = ["可用参考图（文件名就是说明，括号里的也算）："]
+        for p in files:
+            tag = "（默认）" if p.stem == default_name else ""
+            lines.append(f"- {p.stem}{tag}")
+        if default_name:
+            lines.append(f"没有更合适的，就用默认：{default_name}")
+        return "\n".join(lines)
+
     # ── 自检工具 ────────────────────────────────────────────────────────
     @filter.llm_tool(name="doubao_paint_status")
     async def doubao_paint_status(self, event: AstrMessageEvent) -> str:
@@ -806,7 +853,7 @@ class DoubaoPaintPlugin(Star):
         except Exception:  # noqa: BLE001
             lines.append(f"豆包 CDP {self.cdp_port}：❌ 没在跑（第一次画图时会自动拉起来）")
 
-        lines.append(f"角色图：Q版={self._ref_self(False) or '❌'}｜成熟={self._ref_self(True) or '❌'}")
+        lines.append("角色图（按文件名挑）：" + self._ref_list_text())
         state = self._state_block()
         lines.append("状态读取：" + (state[:120] if state else "（没读到，或 read_state 关了）"))
         return "\n".join(lines)

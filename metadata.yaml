@@ -31,7 +31,7 @@ desc: >-
   AI 会按 SETUP-FOR-AI.md 检查 node/豆包/painter、填好路径、放好角色参考图，
   最后真画一张验证链路。
 
-version: 0.2.1
+version: 0.3.0
 author: paopao
 repo: https://github.com/zuoyu123654/astrbot_plugin_doubao_paint
 astrbot_version: ">=4.17.0"
