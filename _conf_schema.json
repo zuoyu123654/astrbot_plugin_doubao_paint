@@ -104,6 +104,11 @@
     "description": "Q 版角色设定图路径。留空 = 在 <插件数据目录>/refs/ 里按文件名找（含 cute / q版 / chibi）。",
     "default": ""
   },
+  "self_appearance": {
+    "type": "string",
+    "description": "没有角色参考图时，用来锁住她形象的文字描述（默认留空 = 用内置的「蓝色大肥鱼」描述：蓝渐变长发、呆毛、鲸鳍耳、深蓝白女仆裙、大鲸尾、Q 版）。想换成自己角色的外貌就填这里。",
+    "default": ""
+  },
   "self_ref_mature": {
     "type": "string",
     "description": "成熟版角色设定图路径。留空 = 在 <插件数据目录>/refs/ 里按文件名找（含 mature / 成熟）。",

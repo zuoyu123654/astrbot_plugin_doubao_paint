@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.3.1"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -118,6 +118,8 @@ class DoubaoPaintPlugin(Star):
         self.state_plugin = str(cfg.get("state_plugin", "astrbot_plugin_private_companion") or "").strip()
         self.state_read_all_files = bool(cfg.get("state_read_all_files", False))
 
+        # 没有参考图时用来锁形象的文字；留空 = 用内置的「蓝色大肥鱼」描述
+        self.self_appearance = str(cfg.get("self_appearance", "") or "").strip()
         self.ref_cute_cfg = str(cfg.get("self_ref_cute", "") or "").strip()
         self.ref_mature_cfg = str(cfg.get("self_ref_mature", "") or "").strip()
 
@@ -187,7 +189,7 @@ class DoubaoPaintPlugin(Star):
     def _self_appearance_text(self, has_ref: bool) -> str:
         """给画/不给参考图时，用来锁住她形象的说明。"""
 
-        base = (
+        base = self.self_appearance or (
             "蓝色渐变长发（发梢浅蓝）、头顶一根呆毛、耳侧是薄片状鲸鳍、蓝色圆眼、"
             "深蓝白色女仆长裙配白围裙（围裙上有小鲸鱼）、身后一条大鲸尾，Q 版圆润"
         )
