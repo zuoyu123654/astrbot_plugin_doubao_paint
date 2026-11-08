@@ -23,7 +23,10 @@ desc: >-
      并要求画面光线和天气对得上。
   5. **两种后端**：`image_backend=doubao`（本机豆包）或 `openai`（任意兼容接口，纯文字走
      `/images/generations`，带参考图走 `/images/edits`）。
-  6. 自检工具 `doubao_paint_status` 与 `doubao_list_refs`；生成图 7 天自动清理；并发锁（一次只画一张）。
+  6. **她想画就画**：聊天里聊到好吃的/好看的，她可以主动画一张发过来（默认 30 分钟冷却）。
+  7. **默认只有主人能用**（access_mode=owner，认 cmd_config.json 的 admins_id）。
+  8. 自检工具 `doubao_paint_status` / `doubao_list_refs` / `doubao_now_playing`；
+     生成图 7 天自动清理；并发锁（一次只画一张）。
 
   【关于水印】本地豆包取的是 CDN 上的 cgen 原图（1536/1920 高清），但**免费套餐账号的原图仍带
   「豆包 AI生成」水印**，要完全干净得用会员账号；生图 API 一般无水印（看服务商）。
@@ -35,7 +38,7 @@ desc: >-
 
   AI 会先问你要「本地豆包」还是「生图模型 API」，再按 SETUP-FOR-AI.md 配好、放参考图、真画一张验证。
 
-version: 0.5.1
+version: 0.5.2
 author: paopao
 repo: https://github.com/zuoyu123654/astrbot_plugin_doubao_paint
 astrbot_version: ">=4.17.0"
