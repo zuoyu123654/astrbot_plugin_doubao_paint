@@ -37,13 +37,15 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.4.1"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
+# 只有用户「明确在指一张图」时才认为缺参考图；不要拿模型写的画面描述来匹配
 NEED_REF_HINTS = (
-    "这张", "这幅", "这个", "照这", "按这", "参考", "用这", "图里", "照片", "原图", "它",
-    "改这", "换个风格", "水彩风", "漫画风", "赛博朋克风",
+    "这张图", "这幅图", "这张照片", "这几张", "照这张", "照这幅", "照这个", "照着这张",
+    "按这张", "按这幅", "按这个画", "参考这张", "参考这幅", "参考图", "用这张", "用这幅",
+    "图里的", "照片里的", "原图", "改这张", "把这张", "拿这张",
 )
 
 SELF_HINTS = (
@@ -789,9 +791,11 @@ class DoubaoPaintPlugin(Star):
                 留空 = 自动挑：先看话里有没有提到文件名，没有就用「默认」那张。
         """
 
-        target = self._painter_script()
-        if target is None:
-            return "画不了：没找到 dsh-doubao-painter 的 tools/paint.mjs（检查 painter_dir 配置）"
+        # 只有走本地豆包才需要 painter；API 后端不需要
+        if self.backend != "openai":
+            target = self._painter_script()
+            if target is None:
+                return "画不了：没找到 dsh-doubao-painter 的 tools/paint.mjs（检查 painter_dir 配置）"
 
         body = (prompt or "").strip()
         if not body:
@@ -819,9 +823,10 @@ class DoubaoPaintPlugin(Star):
                 body += "\n\n" + self._self_appearance_text(bool(ref))
         refs = [r for r in dict.fromkeys(refs) if Path(r).is_file()]
 
-        # 先发需求、后发图：需求里明显要「参考一张图」，但这会儿还没有图
+        # 先发需求、后发图：只有「用户自己说」要照某张图、且确实没图时，才挂起等图
+        user_text = str(getattr(event, "message_str", "") or "")
         if not refs and not use_self and self.auto_paint_next_image and any(
-            h in body for h in NEED_REF_HINTS
+            h in user_text for h in NEED_REF_HINTS
         ):
             umo = str(event.unified_msg_origin or "")
             self._pending[umo] = {
