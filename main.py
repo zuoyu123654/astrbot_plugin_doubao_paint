@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.6.0"
+PLUGIN_VERSION = "0.6.1"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -933,9 +933,11 @@ class DoubaoPaintPlugin(Star):
 
         # 用用户的图当参考图时，先读一下图里是什么（她才知道自己照着什么画）
         image_note = ""
+        desc_text = ""
         if refs and not use_self:
             desc = await self._describe_image(refs[0])
             if desc:
+                desc_text = desc
                 image_note = f"\n\n【参考图里是】{desc}"
 
         # 先发需求、后发图：只有「用户自己说」要照某张图、且确实没图时，才挂起等图
@@ -982,6 +984,10 @@ class DoubaoPaintPlugin(Star):
             logger.warning("[DoubaoPaint] 发图失败：%s", exc)
             return f"画好了，但发图失败：{exc}"
 
+        # 图不在本条消息里（先发图、后说需求）⇒ 把看图结果交给她，她可以顺口转述；
+        # 图和需求同一条 / 先需求后补图：只回「画好了」，不再额外回复图的内容
+        if desc_text and not img_now:
+            return f"画好了，图已经发给你了（你说的是这张图吧：{desc_text}）"
         return "画好了，图已经发给你了"
 
     async def _generate(self, prompt: str, refs: list[str]) -> tuple[bool, str, list[str]]:
