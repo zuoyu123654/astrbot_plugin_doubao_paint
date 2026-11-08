@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.3.6"
+PLUGIN_VERSION = "0.3.7"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -486,6 +486,83 @@ class DoubaoPaintPlugin(Star):
         "深夜": "很晚了，安静、光线很弱，只有室内弱光",
     }
 
+    def _v2_role_plan(self) -> str:
+        """读陪伴插件 v2 的「角色计划·当前计划时段」（calendar_records / kind=role_plan）。"""
+
+        now_ts = time.time()
+        cached = getattr(self, "_plan_cache", None)
+        if cached and now_ts - cached[0] < 60:
+            return cached[1]
+
+        text = ""
+        root = self.data_dir.parent / (self.state_plugin or "")
+        if root.is_dir():
+            for db in list(root.rglob("companion-v2.sqlite3"))[:2]:
+                tmpdir = None
+                try:
+                    import sqlite3
+                    import tempfile
+
+                    tmpdir = Path(tempfile.mkdtemp(prefix="dp_plan_"))
+                    tmp = tmpdir / "db.sqlite3"
+                    shutil.copy2(db, tmp)
+                    for sfx in ("-wal", "-shm"):
+                        side = Path(str(db) + sfx)
+                        if side.is_file():
+                            shutil.copy2(side, Path(str(tmp) + sfx))
+                    con = sqlite3.connect(str(tmp))
+                    try:
+                        rows = con.execute(
+                            "select record_json from calendar_records "
+                            "where record_json like '%role_plan%'"
+                        ).fetchall()
+                    finally:
+                        con.close()
+
+                    now = datetime.now().astimezone()
+                    best: tuple[datetime, datetime, dict] | None = None
+                    for (raw,) in rows:
+                        try:
+                            rec = json.loads(raw)
+                        except Exception:
+                            continue
+                        sched = rec.get("schedule") or {}
+                        anchor_at = sched.get("anchor")
+                        if not anchor_at:
+                            continue
+                        try:
+                            start = datetime.fromisoformat(
+                                str(anchor_at).replace("Z", "+00:00")
+                            ).astimezone()
+                        except Exception:
+                            continue
+                        end = start + timedelta(minutes=int(rec.get("duration_minutes") or 45))
+                        if start <= now < end and (best is None or start > best[0]):
+                            best = (start, end, rec)
+
+                    if best:
+                        start, end, rec = best
+                        title = str(rec.get("title") or "").strip()
+                        narrative = ""
+                        details = rec.get("details")
+                        if isinstance(details, dict):
+                            narrative = " ".join(
+                                str(v).strip() for v in details.values() if str(v).strip()
+                            )
+                        narrative = narrative or str(rec.get("detail") or "").strip()
+                        text = f"{start:%H:%M}–{end:%H:%M} {title}"
+                        if narrative:
+                            text += "：" + narrative
+                        break
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("[DoubaoPaint] 读 v2 计划失败：%s", exc)
+                finally:
+                    if tmpdir is not None:
+                        shutil.rmtree(tmpdir, ignore_errors=True)
+
+        self._plan_cache = (now_ts, text)
+        return text
+
     def _now_playing_text(self) -> str:
         """她「现在在做什么」：读陪伴插件能读到的活动 + 当下的时段/心情。
 
@@ -498,6 +575,10 @@ class DoubaoPaintPlugin(Star):
 
         now = datetime.now()
         bits.append(f"现在是{now.strftime('%Y-%m-%d %H:%M')}（{self._daypart(now.hour)}）")
+
+        plan_text = self._v2_role_plan()
+        if plan_text:
+            bits.append("今日上演：" + plan_text)
 
         # 「今日上演」：daily_plan.schedule 里覆盖当前时间的那个活动
         try:
