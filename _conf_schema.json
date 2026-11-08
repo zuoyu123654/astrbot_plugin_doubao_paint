@@ -14,6 +14,16 @@
     "description": "谁能用：owner（只有主人=cmd_config.json 的 admins_id，默认）/ whitelist（主人+allowed_users）/ everyone（所有人）。",
     "default": "owner"
   },
+  "allow_self_initiated": {
+    "type": "bool",
+    "description": "允许她自己想画就画：聊天里聊到好吃的/好看的/她今天干了什么，她可以直接画一张发过来。",
+    "default": true
+  },
+  "self_initiated_cooldown_minutes": {
+    "type": "int",
+    "description": "她自己主动画的冷却（分钟），防止刷屏。0 = 不限制。",
+    "default": 20
+  },
   "allowed_users": {
     "type": "list",
     "description": "access_mode=whitelist 时额外允许的 QQ 号列表。",

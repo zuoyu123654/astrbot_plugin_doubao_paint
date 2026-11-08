@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.4.2"
+PLUGIN_VERSION = "0.5.0"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -133,6 +133,16 @@ class DoubaoPaintPlugin(Star):
         self.allowed_users = {
             str(u).strip() for u in raw_users if str(u).strip()
         } if isinstance(raw_users, (list, tuple, set)) else set()
+
+        # 她可以主动画：自己想画就画一张发过去，带冷却
+        self.allow_self_initiated = bool(cfg.get("allow_self_initiated", True))
+        try:
+            self.self_initiated_cooldown = max(
+                0, int(cfg.get("self_initiated_cooldown_minutes", 20) or 0)
+            )
+        except (TypeError, ValueError):
+            self.self_initiated_cooldown = 20
+        self._last_self_draw = 0.0
 
         self.read_state = bool(cfg.get("read_state", True))
         self.state_plugin = str(cfg.get("state_plugin", "astrbot_plugin_private_companion") or "").strip()
@@ -790,11 +800,15 @@ class DoubaoPaintPlugin(Star):
         with_state: bool = False,
         reference: str = "",
         mature: bool = False,
+        proactive: bool = False,
     ) -> str:
         """用本机「豆包」生成图片，并把图直接发回当前 QQ 会话。
 
         什么时候用：
         - 用户说「画一张…」「生成一张…」「来张图」「照这个画」；
+        - **你也可以自己想画就画**：聊天里聊到好吃的、好看的、你今天干了什么、
+          或者你就是想给他看看你现在的样子，都可以直接画一张发过去，不用等他开口。
+          这种情况把 proactive 设成 true（会有冷却，别刷屏）。
         - 用户让你「画一张你现在的状态 / 画你自己」→ self_portrait=true 且 with_state=true。
           画她自己之前：先调 `doubao_now_playing` 看她现在在做什么，**你来写一段具体的画面描述**放进 prompt；
           再调 `doubao_list_refs` 看有哪些角色参考图，挑名字最合适的填 reference。
@@ -808,6 +822,7 @@ class DoubaoPaintPlugin(Star):
             self_portrait(bool): 是不是画「她自己」。true 时用内置角色设定图当参考图，保持形象一致。
                 用户说「画一个你看书的样子」「想看你看书」「画你的样子」这类，都算画她自己 → true。
             with_state(bool): 是否把此刻的状态/天气写进提示词（配 self_portrait 用得最多）
+            proactive(bool): 这次是「你自己想画」的（不是用户要求的）→ true；用户要求的留 false
             reference(string): 用哪张参考图，填文件名里的关键词（例如「成熟」「女仆装」「默认」；
                 括号里的说明也算，比如「默认（Q版可爱 女仆装）」可以填「女仆装」）。
                 留空 = 自动挑：先看话里有没有提到文件名，没有就用「默认」那张。
@@ -827,6 +842,15 @@ class DoubaoPaintPlugin(Star):
         refs: list[str] = []
         if not self._can_use(event):
             return self.DENY_TEXT
+
+        if proactive:
+            if not self.allow_self_initiated:
+                return "（这次就不画了，老大没让我自己画）"
+            gap = time.time() - self._last_self_draw
+            if self.self_initiated_cooldown and gap < self.self_initiated_cooldown * 60:
+                left = int((self.self_initiated_cooldown * 60 - gap) / 60) + 1
+                return f"刚画过一张了，等 {left} 分钟再画，别刷屏。"
+            self._last_self_draw = time.time()
 
         user_text = str(getattr(event, "message_str", "") or "")
         use_self = bool(self_portrait) or self._looks_like_self(user_text or body)

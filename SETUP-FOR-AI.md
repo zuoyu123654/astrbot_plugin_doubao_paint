@@ -236,6 +236,14 @@
 - 画她自己时，先调 `doubao_now_playing` 拿到「今日上演」，**由你写一段具体画面描述**，
   再调 `doubao_paint(self_portrait=true, prompt=你写的那段)`。
 
+## 6.4 她自己想画就画（可选）
+
+- 默认允许：她聊天时想画就能画一张发过去（`allow_self_initiated: true`）。
+- 冷却 `self_initiated_cooldown_minutes`（默认 20 分钟），防止刷屏。
+- 注意：这依赖「她正在跟用户对话」这一轮；陪伴插件的**主动消息**不一定带工具，
+  所以主动消息里不一定画得出来。
+- 不想让她自己画：`allow_self_initiated: false`。
+
 ## 6.5 权限（默认锁给主人）
 
 - 默认 `access_mode: "owner"`：只有 `data/cmd_config.json` 里 `admins_id` 的人（以及平台 `role=admin`）能用；
