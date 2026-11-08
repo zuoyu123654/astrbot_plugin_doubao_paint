@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.5.3"
+PLUGIN_VERSION = "0.6.0"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -150,6 +150,9 @@ class DoubaoPaintPlugin(Star):
 
         # 没有参考图时用来锁形象的文字；留空 = 用内置的「蓝色大肥鱼」描述
         self.self_appearance = str(cfg.get("self_appearance", "") or "").strip()
+        # 拿用户的图当参考图之前，先让多模态模型描述一下（没有多模态 provider 就自动跳过）
+        self.read_image = bool(cfg.get("read_image", True))
+        self.caption_provider = str(cfg.get("caption_provider", "") or "").strip()
         self.ref_cute_cfg = str(cfg.get("self_ref_cute", "") or "").strip()
         self.ref_mature_cfg = str(cfg.get("self_ref_mature", "") or "").strip()
 
@@ -239,6 +242,53 @@ class DoubaoPaintPlugin(Star):
             if p.is_file():
                 return p
         return None
+
+    async def _describe_image(self, path: str) -> str:
+        """让多模态模型描述参考图内容（缓存 30 分钟；不支持就返回空）。"""
+
+        if not self.read_image or not path or not Path(path).is_file():
+            return ""
+        try:
+            stat = Path(path).stat()
+            cache_key = f"{path}|{int(stat.st_mtime)}|{stat.st_size}"
+            cache = getattr(self, "_image_desc_cache", None)
+            if cache is None:
+                cache = {}
+                self._image_desc_cache = cache
+            hit = cache.get(cache_key)
+            if hit and time.time() - hit[0] < 1800:
+                return hit[1]
+
+            provider = None
+            try:
+                if self.caption_provider:
+                    provider = self.context.get_provider_by_id(self.caption_provider)
+                if provider is None:
+                    provider = self.context.get_using_provider()
+            except Exception:  # noqa: BLE001
+                provider = None
+            if provider is None:
+                return ""
+
+            resp = await provider.text_chat(
+                prompt=(
+                    "用 1~2 句中文描述这张图：主体是什么、在做什么、主要颜色、光线、场景。"
+                    "只输出描述，不要客套话。"
+                ),
+                image_urls=[str(path)],
+            )
+            text = str(getattr(resp, "completion_text", "") or "").strip()
+            text = text.replace("\n", " ")[:120]
+            cache[cache_key] = (time.time(), text)
+            if len(cache) > 50:
+                for k in list(cache)[:20]:
+                    cache.pop(k, None)
+            if text:
+                logger.info("[DoubaoPaint] 参考图描述：%s", text)
+            return text
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[DoubaoPaint] 读图失败（忽略）：%s", exc)
+            return ""
 
     def _ref_files(self) -> list[Path]:
         exts = (".png", ".jpg", ".jpeg", ".webp")
@@ -350,6 +400,11 @@ class DoubaoPaintPlugin(Star):
         umo = str(task.get("umo") or "")
         refs = [image_path]
         self_ref = ""
+        if not task.get("self_portrait") and image_path:
+            desc = await self._describe_image(image_path)
+            if desc:
+                prompt = prompt + f"\n\n【参考图里是】{desc}"
+
         if task.get("self_portrait"):
             self_ref = self._pick_ref(
                 str(task.get("reference") or ("成熟" if task.get("mature") else "")),
@@ -876,6 +931,13 @@ class DoubaoPaintPlugin(Star):
                 body += "\n\n" + self._self_appearance_text(bool(ref))
         refs = [r for r in dict.fromkeys(refs) if Path(r).is_file()]
 
+        # 用用户的图当参考图时，先读一下图里是什么（她才知道自己照着什么画）
+        image_note = ""
+        if refs and not use_self:
+            desc = await self._describe_image(refs[0])
+            if desc:
+                image_note = f"\n\n【参考图里是】{desc}"
+
         # 先发需求、后发图：只有「用户自己说」要照某张图、且确实没图时，才挂起等图
         if not refs and not use_self and self.auto_paint_next_image and any(
             h in user_text for h in NEED_REF_HINTS
@@ -900,6 +962,8 @@ class DoubaoPaintPlugin(Star):
             if state:
                 head.append("【她此刻的状态】" + state + "。把这些画进表情、动作、场景里。")
             body = "\n\n".join(head) + "\n\n【画面】" + body
+        if image_note:
+            body += image_note
 
         # 3) 调 painter（一次只能跑一个，加锁）
         async with self._lock:
