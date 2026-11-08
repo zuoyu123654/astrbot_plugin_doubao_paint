@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.4.1"
+PLUGIN_VERSION = "0.4.2"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -48,9 +48,16 @@ NEED_REF_HINTS = (
     "图里的", "照片里的", "原图", "改这张", "把这张", "拿这张",
 )
 
+# 「画/看 你……的样子」这类也要当成画她自己（正则比关键词准）
+SELF_PATTERNS = (
+    r"你的?[^\s，。,.!?！？]{0,8}(样子|模样|画像|自拍|半身像|全身像)",
+    r"(?:画|来|想看|想看看|看看|要)(?:一张|一个|个)?你(?![的])",
+    r"你长什么样|你现在的|你平时|你读书|你看书",
+)
+
 SELF_HINTS = (
-    "你自己", "你现在的", "你的样子", "你长什么样", "画你", "画个你", "画一只你",
-    "自画像", "泡泡", "本鲸鱼娘", "你的状态", "你此刻",
+    "你自己", "你现在的", "你的样子", "你的模样", "你长什么样", "画个你", "画一只你",
+    "自画像", "泡泡", "本鲸鱼娘", "你的状态", "你此刻", "画一张你", "画一个你",
 )
 MATURE_HINTS = ("成熟", "长大", "成年", "御姐", "大只", "第二张", "第二个形象")
 
@@ -253,6 +260,20 @@ class DoubaoPaintPlugin(Star):
             "这次没有参考图，请严格按她的固定形象画（不要画成别人）："
             f"{base}，身高约 1.45 米，抱起来软乎乎有分量。"
         )
+
+    @staticmethod
+    def _looks_like_self(text: str) -> bool:
+        """用户是不是在说「画她自己」（画你看书的样子 / 想看你的样子 …）。"""
+
+        text = str(text or "")
+        if not text:
+            return False
+        if any(h in text for h in SELF_HINTS):
+            return True
+        for pattern in SELF_PATTERNS:
+            if re.search(pattern, text):
+                return True
+        return False
 
     def _pick_ref(self, keyword: str, prompt: str) -> str:
         """按文件名挑参考图：先看显式指定的词，再看用户话里提到的名字，最后用「默认」。
@@ -784,7 +805,8 @@ class DoubaoPaintPlugin(Star):
                 比如用户说「画一只猫」，就写你心目中的猫长什么样（颜色/胖瘦/表情）、在干什么、什么光；
                 用户说「画你现在的状态」，就写你此刻在做什么、什么表情。
                 可以把这理解成**你在画画**：你描述的这段画面，最后会真的画出来给用户看。
-            self_portrait(bool): 是不是画「她自己」。true 时用内置角色设定图当参考图，保持形象一致
+            self_portrait(bool): 是不是画「她自己」。true 时用内置角色设定图当参考图，保持形象一致。
+                用户说「画一个你看书的样子」「想看你看书」「画你的样子」这类，都算画她自己 → true。
             with_state(bool): 是否把此刻的状态/天气写进提示词（配 self_portrait 用得最多）
             reference(string): 用哪张参考图，填文件名里的关键词（例如「成熟」「女仆装」「默认」；
                 括号里的说明也算，比如「默认（Q版可爱 女仆装）」可以填「女仆装」）。
@@ -806,7 +828,8 @@ class DoubaoPaintPlugin(Star):
         if not self._can_use(event):
             return self.DENY_TEXT
 
-        use_self = bool(self_portrait) or any(h in body for h in SELF_HINTS)
+        user_text = str(getattr(event, "message_str", "") or "")
+        use_self = bool(self_portrait) or self._looks_like_self(user_text or body)
         img_now = self._image_in_event(event)
         if img_now:
             # 这条消息里就带图：优先用它当参考图
@@ -824,7 +847,6 @@ class DoubaoPaintPlugin(Star):
         refs = [r for r in dict.fromkeys(refs) if Path(r).is_file()]
 
         # 先发需求、后发图：只有「用户自己说」要照某张图、且确实没图时，才挂起等图
-        user_text = str(getattr(event, "message_str", "") or "")
         if not refs and not use_self and self.auto_paint_next_image and any(
             h in user_text for h in NEED_REF_HINTS
         ):
