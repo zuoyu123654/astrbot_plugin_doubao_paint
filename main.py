@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.3.4"
+PLUGIN_VERSION = "0.3.5"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -277,9 +277,6 @@ class DoubaoPaintPlugin(Star):
             state = self._state_block()
             if state:
                 head.append("【她此刻的状态】" + state + "。把这些画进表情、动作、场景里。")
-            scene = self._now_scene()
-            if scene:
-                head.append("【她此刻在做】" + scene + "。画面就从这里来。")
             body = "\n\n".join(head) + "\n\n【画面】" + prompt
         else:
             body = prompt
@@ -489,33 +486,76 @@ class DoubaoPaintPlugin(Star):
         "深夜": "很晚了，安静、光线很弱，只有室内弱光",
     }
 
-    def _now_scene(self) -> str:
-        """从陪伴插件里拼一句「此刻在干嘛」，拼不出来就空着。"""
+    def _now_playing_text(self) -> str:
+        """她「现在在做什么」：读陪伴插件能读到的活动 + 当下的时段/心情。
+
+        面板上的「今日上演」是插件运行时拼出来的，不一定落盘；
+        这里把能读到的线索都给出来，让模型自己写画面提示词。
+        """
 
         data = self._load_companions() or {}
         bits: list[str] = []
+
+        now = datetime.now()
+        bits.append(f"现在是{now.strftime('%Y-%m-%d %H:%M')}（{self._daypart(now.hour)}）")
+
+        # 「今日上演」：daily_plan.schedule 里覆盖当前时间的那个活动
         try:
-            users = data.get("users") or {}
-            u = next(iter(users.values())) if isinstance(users, dict) and users else {}
-            label = str(((u.get("current_interaction") or {}).get("label")) or "").strip()
-            if label:
-                bits.append(f"互动状态：{label}")
+            plan = data.get("daily_plan") if isinstance(data.get("daily_plan"), dict) else {}
+            plan_date = str(plan.get("date") or "")
+            raw = plan.get("raw")
+            payload = json.loads(raw) if isinstance(raw, str) and raw.strip().startswith("{") else {}
+            sched = payload.get("schedule") or []
+            if plan_date == now.strftime("%Y-%m-%d") and isinstance(sched, list):
+                cur = now.hour * 60 + now.minute
+                for item in sched:
+                    if not isinstance(item, dict):
+                        continue
+                    t0 = str(item.get("time") or "")
+                    t1 = str(item.get("end") or "")
+                    try:
+                        h0, m0 = [int(x) for x in t0.split(":")[:2]]
+                        h1, m1 = [int(x) for x in t1.split(":")[:2]]
+                    except Exception:
+                        continue
+                    if h0 * 60 + m0 <= cur < h1 * 60 + m1:
+                        act = str(item.get("activity") or "").strip()
+                        mood_s = str(item.get("mood") or "").strip()
+                        if act:
+                            bits.append("今日上演：" + act + (f"（{mood_s}）" if mood_s else ""))
+                        break
         except Exception:  # noqa: BLE001
             pass
 
-        # 最近 36 小时内记录过的活动才算「现在」
+        ds = data.get("daily_state") if isinstance(data.get("daily_state"), dict) else {}
+        mood = str(ds.get("mood_bias") or "").strip()
+        energy = ds.get("energy")
+        if mood:
+            bits.append(f"心情偏{mood}")
+        if isinstance(energy, (int, float)):
+            bits.append(f"精力 {int(energy)}/100")
+
         try:
             acts = data.get("observed_activities") or []
-            if isinstance(acts, list) and acts:
-                last = acts[-1]
-                end_at = str(last.get("end_at") or last.get("start_at") or "")
-                title = str(last.get("title") or "").strip()
-                if title and end_at:
+            recent: list[str] = []
+            if isinstance(acts, list):
+                for a in acts[-8:]:
+                    if not isinstance(a, dict):
+                        continue
+                    end_at = str(a.get("end_at") or a.get("start_at") or "")
+                    title = str(a.get("title") or "").strip()
+                    summary = str(a.get("summary") or "").strip()
+                    if not end_at or not (title or summary):
+                        continue
                     stamp = datetime.fromisoformat(end_at)
-                    if (datetime.now(stamp.tzinfo) - stamp).total_seconds() < 36 * 3600:
-                        bits.append(f"刚在做：{title}")
+                    if (datetime.now(stamp.tzinfo) - stamp).total_seconds() > 36 * 3600:
+                        continue
+                    recent.append(title or summary)
+            if recent:
+                bits.append("最近在做：" + "；".join(dict.fromkeys(recent))[:120])
         except Exception:  # noqa: BLE001
             pass
+
         return "；".join(bits)
 
     def _constraint_block(self, now: datetime | None = None) -> str:
@@ -600,7 +640,8 @@ class DoubaoPaintPlugin(Star):
         什么时候用：
         - 用户说「画一张…」「生成一张…」「来张图」「照这个画」；
         - 用户让你「画一张你现在的状态 / 画你自己」→ self_portrait=true 且 with_state=true。
-          画她自己之前，可以先调 `doubao_list_refs` 看有哪些角色参考图，挑名字最合适的填 reference。
+          画她自己之前：先调 `doubao_now_playing` 看她现在在做什么，**你来写一段具体的画面描述**放进 prompt；
+          再调 `doubao_list_refs` 看有哪些角色参考图，挑名字最合适的填 reference。
 
         Args:
             prompt(string): 画面描述（要有主体、风格、构图、光线；中文写）
@@ -661,9 +702,6 @@ class DoubaoPaintPlugin(Star):
             state = self._state_block()
             if state:
                 head.append("【她此刻的状态】" + state + "。把这些画进表情、动作、场景里。")
-            scene = self._now_scene()
-            if scene:
-                head.append("【她此刻在做】" + scene + "。画面就从这里来。")
             body = "\n\n".join(head) + "\n\n【画面】" + body
 
         # 3) 调 painter（一次只能跑一个，加锁）
@@ -848,6 +886,16 @@ class DoubaoPaintPlugin(Star):
         if not files and data.get("items"):
             files = [f for it in data["items"] for f in (it.get("files") or [])]
         return True, "", files
+
+    @filter.llm_tool(name="doubao_now_playing")
+    async def doubao_now_playing(self, event: AstrMessageEvent) -> str:
+        """查她「现在在做什么」：当下的时间/时段、心情、精力、最近在做的活动。
+
+        用户说「画一张你现在的状态」时，先调这个，然后**由你根据这些线索写一段具体的画面描述**，
+        再调 doubao_paint(self_portrait=true, prompt=你写的那段)。
+        """
+
+        return self._now_playing_text() or "（没读到她的活动，按当前时间和心情自己写一段吧）"
 
     @filter.llm_tool(name="doubao_list_refs")
     async def doubao_list_refs(self, event: AstrMessageEvent) -> str:
