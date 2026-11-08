@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.3.7"
+PLUGIN_VERSION = "0.3.8"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -729,6 +729,7 @@ class DoubaoPaintPlugin(Star):
                 不要原样转发用户的话：先理解，再写成你心里那个画面——
                 比如用户说「画一只猫」，就写你心目中的猫长什么样（颜色/胖瘦/表情）、在干什么、什么光；
                 用户说「画你现在的状态」，就写你此刻在做什么、什么表情。
+                可以把这理解成**你在画画**：你描述的这段画面，最后会真的画出来给用户看。
             self_portrait(bool): 是不是画「她自己」。true 时用内置角色设定图当参考图，保持形象一致
             with_state(bool): 是否把此刻的状态/天气写进提示词（配 self_portrait 用得最多）
             reference(string): 用哪张参考图，填文件名里的关键词（例如「成熟」「女仆装」「默认」；
