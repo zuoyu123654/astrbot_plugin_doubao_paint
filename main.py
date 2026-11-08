@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -325,9 +325,71 @@ class DoubaoPaintPlugin(Star):
                     return data
         return None
 
-    def _weather_text(self, ds: dict, dw: dict) -> str:
-        """取真实天气；「暂无天气信息」这类占位一律当没有。"""
+    def _v2_weather(self) -> str:
+        """从陪伴插件 v2 的 sqlite 里读最近一次真实天气（qweather 采样的那份）。"""
 
+        now = time.time()
+        cached = getattr(self, "_weather_cache", None)
+        if cached and now - cached[0] < 60:
+            return cached[1]
+
+        text = ""
+        root = self.data_dir.parent / (self.state_plugin or "")
+        if root.is_dir():
+            for db in list(root.rglob("companion-v2.sqlite3"))[:2]:
+                tmpdir = None
+                try:
+                    import sqlite3
+                    import tempfile
+
+                    tmpdir = Path(tempfile.mkdtemp(prefix="dp_v2_"))
+                    tmp = tmpdir / "db.sqlite3"
+                    shutil.copy2(db, tmp)
+                    for sfx in ("-wal", "-shm"):
+                        side = Path(str(db) + sfx)
+                        if side.is_file():
+                            shutil.copy2(side, Path(str(tmp) + sfx))
+                    con = sqlite3.connect(str(tmp))
+                    try:
+                        row = con.execute(
+                            "select sample_json from proactive_weather_samples "
+                            "order by rowid desc limit 1"
+                        ).fetchone()
+                    finally:
+                        con.close()
+                    if not row or not row[0]:
+                        continue
+                    data = json.loads(row[0])
+                    cond = str(data.get("condition") or "").strip()
+                    temp = data.get("temperature_c")
+                    hum = data.get("humidity_pct")
+                    place = str(data.get("role_location") or "").strip()
+                    if not cond and temp is None:
+                        continue
+                    body = ""
+                    if cond:
+                        body = cond
+                    if isinstance(temp, (int, float)):
+                        body += (" " if body else "") + f"{temp:g}℃"
+                    if isinstance(hum, (int, float)):
+                        body += f"（湿度 {hum:g}%）"
+                    text = (place + " · " + body) if place else body
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("[DoubaoPaint] 读 v2 天气失败：%s", exc)
+                finally:
+                    if tmpdir is not None:
+                        shutil.rmtree(tmpdir, ignore_errors=True)
+
+        self._weather_cache = (now, text)
+        return text
+
+    def _weather_text(self, ds: dict, dw: dict) -> str:
+        """真实天气优先：v2 sqlite 的采样 → 旧的 daily_weather；占位一律当没有。"""
+
+        text = self._v2_weather()
+        if text:
+            return text
         for raw in (dw.get("prompt"), ds.get("weather")):
             text = str(raw or "").strip()
             if not text:
@@ -435,7 +497,10 @@ class DoubaoPaintPlugin(Star):
         dream = str(ds.get("dream") or "").strip().rstrip("。.,，;；")
         if dream:
             bits.append("最近的梦：" + (dream[:50] + "…" if len(dream) > 50 else dream))
-        return "；".join(bits)
+        text = "；".join(bits)
+        if bits and state_date and not fresh:
+            text = f"（上次记录 {state_date}）" + text
+        return text
 
     # ── 主工具：画图 ────────────────────────────────────────────────────
     @filter.llm_tool(name="doubao_paint")
