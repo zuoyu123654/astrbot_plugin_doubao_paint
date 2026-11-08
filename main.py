@@ -33,13 +33,19 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Image
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.1.2"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
+# 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
+NEED_REF_HINTS = (
+    "这张", "这幅", "这个", "照这", "按这", "参考", "用这", "图里", "照片", "原图", "它",
+    "改这", "换个风格", "水彩风", "漫画风", "赛博朋克风",
+)
+
 SELF_HINTS = (
     "你自己", "你现在的", "你的样子", "你长什么样", "画你", "画个你", "画一只你",
     "自画像", "泡泡", "本鲸鱼娘", "你的状态", "你此刻",
@@ -87,6 +93,12 @@ class DoubaoPaintPlugin(Star):
             self.recent_minutes = max(1, int(cfg.get("recent_image_minutes", 30) or 30))
         except (TypeError, ValueError):
             self.recent_minutes = 30
+        # 「先发需求、后发图」：等到下一张图的窗口期
+        try:
+            self.pending_minutes = max(1, int(cfg.get("pending_image_minutes", 5) or 5))
+        except (TypeError, ValueError):
+            self.pending_minutes = 5
+        self.auto_paint_next_image = bool(cfg.get("auto_paint_on_next_image", True))
 
         self.read_state = bool(cfg.get("read_state", True))
         self.state_plugin = str(cfg.get("state_plugin", "astrbot_plugin_private_companion") or "").strip()
@@ -109,6 +121,8 @@ class DoubaoPaintPlugin(Star):
         self._lock = asyncio.Lock()
         # session → [(path, ts)]，用来接「先发图、后说需求」
         self._recent_images: dict[str, list[tuple[str, float]]] = {}
+        # session → 等着配图的「先发的需求」
+        self._pending: dict[str, dict[str, Any]] = {}
         self._cleaner: asyncio.Task | None = None
 
     # ── 生命周期 ────────────────────────────────────────────────────────
@@ -189,8 +203,59 @@ class DoubaoPaintPlugin(Star):
                     bucket = self._recent_images.setdefault(key, [])
                     bucket.append((path, time.time()))
                     self._recent_images[key] = bucket[-5:]
+                    # 之前是不是有人「先发需求、等图」？有就直接开画
+                    self._fire_pending(key, path)
         except Exception as exc:  # noqa: BLE001
             logger.debug("[DoubaoPaint] 记图片失败：%s", exc)
+
+    def _fire_pending(self, key: str, image_path: str) -> None:
+        task = self._pending.pop(key, None)
+        if not task or not self.auto_paint_next_image:
+            return
+        if time.time() - float(task.get("ts") or 0) > self.pending_minutes * 60:
+            return
+        logger.info("[DoubaoPaint] 收到后补的图，接着画：%s", str(task.get("prompt"))[:40])
+        asyncio.create_task(self._paint_and_send(task, image_path))
+
+    async def _paint_and_send(self, task: dict[str, Any], image_path: str) -> None:
+        """后台把「先发的需求 + 后发的图」画完，再发回同一个会话。"""
+
+        prompt = str(task.get("prompt") or "")
+        umo = str(task.get("umo") or "")
+        refs = [image_path]
+        self_ref = ""
+        if task.get("self_portrait"):
+            self_ref = self._ref_self(bool(task.get("mature")))
+            if self_ref:
+                refs.insert(0, self_ref)
+        body = prompt
+        if self_ref:
+            body += (
+                "\n\n参考图是她的固定角色设定（三视图），务必保持形象一致："
+                "蓝色渐变长发、头顶呆毛、耳侧鲸鳍、深蓝白色女仆裙、身后大鲸尾，Q 版圆润。"
+            )
+        if task.get("with_state") or task.get("self_portrait"):
+            state = self._state_block()
+            if state:
+                body += "\n她此刻的状态与天气：" + state
+            body += "\n现在时间：" + self._now_block()
+        async with self._lock:
+            ok, err, files = await self._run_painter(body, refs)
+        if not ok or not files:
+            logger.warning("[DoubaoPaint] 补图后生成失败：%s", err)
+            try:
+                await self.context.send_message(
+                    umo, MessageChain([Plain(f"图收到了，但画失败了：{err}")])
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        try:
+            await self.context.send_message(
+                umo, MessageChain([Image.fromFileSystem(files[0])])
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DoubaoPaint] 补图后发图失败：%s", exc)
 
     def _recent_image(self, event: AstrMessageEvent) -> str:
         key = str(event.unified_msg_origin or "")
@@ -339,6 +404,22 @@ class DoubaoPaintPlugin(Star):
                     "蓝色渐变长发、头顶呆毛、耳侧鲸鳍、深蓝白色女仆裙、身后大鲸尾，Q 版圆润。"
                 )
         refs = [r for r in dict.fromkeys(refs) if Path(r).is_file()][:3]
+
+        # 先发需求、后发图：需求里明显要「参考一张图」，但这会儿还没有图
+        if not refs and not use_self and self.auto_paint_next_image and any(
+            h in body for h in NEED_REF_HINTS
+        ):
+            umo = str(event.unified_msg_origin or "")
+            self._pending[umo] = {
+                "prompt": body,
+                "umo": umo,
+                "self_portrait": bool(self_portrait),
+                "with_state": bool(with_state),
+                "mature": bool(mature),
+                "ts": time.time(),
+            }
+            logger.info("[DoubaoPaint] 先记下需求，等用户发图：%s", body[:40])
+            return f"好，把图发来，我照它画（{self.pending_minutes} 分钟内有效）"
 
         # 2) 状态/天气
         if with_state or use_self:

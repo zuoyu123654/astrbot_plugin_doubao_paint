@@ -39,6 +39,16 @@
     "description": "「先发图、后说需求」时，记住最近多少分钟内发过的图（默认 30）。",
     "default": 30
   },
+  "pending_image_minutes": {
+    "type": "int",
+    "description": "「先发需求、后发图」时，需求最多挂多久等图（分钟，默认 5）。等到了就自动接着画。",
+    "default": 5
+  },
+  "auto_paint_on_next_image": {
+    "type": "bool",
+    "description": "开着：用户先发需求（比如「照这张画成水彩」）但没带图，插件记下需求；等他下一条发图就自动画。关掉就只回一句「把图发来」。",
+    "default": true
+  },
   "read_state": {
     "type": "bool",
     "description": "画「她现在的状态」时，去读陪伴插件的状态（情绪/精力/天气）。只读，不改。",
