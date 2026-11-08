@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.3.2"
+PLUGIN_VERSION = "0.3.3"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -443,6 +443,8 @@ class DoubaoPaintPlugin(Star):
 
     @staticmethod
     def _daypart(hour: int) -> str:
+        if hour < 5:
+            return "凌晨"
         if 5 <= hour < 9:
             return "清晨"
         if 9 <= hour < 12:
@@ -472,22 +474,49 @@ class DoubaoPaintPlugin(Star):
         line += f"；天气：{weather}" if weather else "；天气未知（不要自己编天气）"
         return line
 
-    def _constraint_block(self) -> str:
-        """放在提示词最前面的硬性前提：时间/天气必须先对上。"""
+    # 不同时段该有什么光——不要一律「白天就画白天的自然光」
+    LIGHT_BY_BAND = {
+        "凌晨": "天还没亮，是夜色/路灯，室内只有微弱的光",
+        "清晨": "天刚亮，光线柔和偏冷，影子很长",
+        "上午": "明亮但还柔和的日光，影子偏长",
+        "中午": "正午顶光，光线强、影子短",
+        "下午": "午后偏斜的阳光，光开始变暖",
+        "傍晚": "太阳偏西，光线明显变弱、偏暖（橘/粉/灰），影子拉长；天还没黑透",
+        "晚上": "天已经黑了，靠室内灯/路灯照明",
+        "深夜": "很晚了，安静、光线很弱，只有室内弱光",
+    }
 
-        now = datetime.now()
-        if 5 <= now.hour < 19:
-            light = (
-                "现在是白天，画面必须有白天的自然光（窗外/天空是亮的），"
-                "绝对不能画成夜晚、深夜或者黑漆漆的室内。"
-            )
+    def _constraint_block(self, now: datetime | None = None) -> str:
+        """放在提示词最前面的硬性前提：时间/天气必须先对上，光线按「现在这个时段」写。"""
+
+        now = now or datetime.now()
+        band = self._daypart(now.hour)
+        weather = ""
+        data = self._load_companions() or {}
+        ds = data.get("daily_state") if isinstance(data.get("daily_state"), dict) else {}
+        dw = data.get("daily_weather") if isinstance(data.get("daily_weather"), dict) else {}
+        weather = self._weather_text(ds, dw)
+
+        head = f"【硬性前提·必须准确】现在是 {now.strftime('%Y-%m-%d %H:%M')}（{band}）"
+        head += f"；天气：{weather}。" if weather else "；天气未知（不要自己编天气）。"
+
+        light = self.LIGHT_BY_BAND.get(band, "光线和当前时间要对得上")
+        body = f"现在的光应该是：{light}。"
+
+        if any(w in (weather or "") for w in ("阴", "雨", "雪", "雾", "霾", "雷")):
+            body += "天气是阴雨/雾雪，别画直射阳光和清晰影子，光要柔、偏灰。"
+        elif any(w in (weather or "") for w in ("多云", "云")):
+            body += "多云：阳光要透过云层，光是散的，别画刺眼的直射光。"
+        elif weather:
+            body += f"天气写的是「{weather}」，天空和地面要跟着对上，别自己加雨雪。"
         else:
-            light = "现在是夜里，画面可以是夜色或室内灯光，但别画成大中午。"
-        return (
-            "【硬性前提·必须准确】" + self._situation_block() + "。"
-            + light
-            + "天气写了晴/雨/雪/阴，天空和地面要跟着对上；没写就别自己加雨雪。"
-        )
+            body += "没写天气，就别自己加雨雪、也别画大晴天。"
+
+        if band in ("傍晚", "晚上", "深夜", "凌晨"):
+            body += "不要画成中午那种强烈日光。"
+        elif band in ("上午", "中午", "下午"):
+            body += "不要画成夜晚、深夜或者黑漆漆的室内。"
+        return head + body
 
     def _state_block(self) -> str:
         """把她此刻的状态翻成人话（不要给豆包看 key=value）。"""
