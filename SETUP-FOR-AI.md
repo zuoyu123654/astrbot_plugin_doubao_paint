@@ -1,74 +1,79 @@
-# 给 AI 的施工文档：把「豆包画画」配到能真的发图
+# 给 AI 的施工文档：把「豆包画画」配到能在 QQ 里出图
 
 > 读者是**接手配置的 AI**。使用者会把这份文档 + `README.md` 给你，并说一句：
 >
-> 「请帮我配置好 AstrBot 里的【豆包画画】插件，并验证是否可用。」
+> **「请帮我配置好 AstrBot 里的【豆包画画】插件，并验证是否可用。」**
 >
-> 照做完，应该达到：**在 QQ 里说「画一张……」，图真的能发回来**；
-> 说「画一张你现在的状态」，用的是她自己的形象 + 当前状态。
-> 文档里的数值都是实测跑通的：本机一次生成 4 张图耗时约 **72 秒**。
+> 照做完，应该达到：**在 QQ 里说「画一张……」，图能发回来**；说「画一张你现在的状态」，
+> 用的是她自己的形象 + 当前时间/天气/情绪。
 
 ---
 
-## 0. 开工前先问（别自己决定）
+## 0. 前置插件（缺一样都跑不起来）
 
-1. **画图走的是本机豆包，已登录吗？** 生图消耗的是豆包账号的免费额度，不是钱，但频率高可能被限。
-2. **要不要读陪伴插件的状态？**（默认读）——读的是 `astrbot_plugin_private_companion` 的
-   `companions.json`（情绪/精力/天气），**只读、不改**。不想让插件碰就设 `read_state: false`。
-3. **要不要放角色参考图？** 让使用者的「她」画得像她本人，就必须有角色设定图（Q 版 / 成熟版各一张）。
-
-**配完必须回报**：node 版本、painter 路径、豆包端口状态、参考图有没有、最后一次真实生成成功没有。
-
----
-
-## 1. 前置（缺一样都画不出来）
-
-| 检查 | 命令 / 位置 | 判定 |
+| 前置 | 必需？ | 说明 |
 | --- | --- | --- |
-| node ≥ 22 | `node --version` | 打印 `v22+` |
-| 豆包已安装 | `%LOCALAPPDATA%\Doubao\Application\app\Doubao.exe` 或 `D:\Doubao\app\Doubao.exe` | 文件存在（**是 app 子目录里那个主程序**，不是外层 launcher） |
-| 豆包已登录 | 手动打开豆包，能正常聊天/生图 | 已登录 |
-| 是否会员 | 豆包首页看套餐 | **免费套餐的图会带「豆包 AI生成」水印**，会员才是干净的原图 |
-| painter 插件 | `%USERPROFILE%\.dsh\plugins\dsh-doubao-painter\tools\paint.mjs` | 文件存在 |
+| **AstrBot ≥ 4.17** | 必需 | 平台必须是 **aiocqhttp（OneBot v11）**，否则发不了图 |
+| QQ空间 / QQ资料 等 | 不需要 | 本插件不依赖它们 |
+| **豆包桌面客户端** | 只有「本地豆包」路线要 | 装好并**已登录** |
+| **dsh-doubao-painter** | 只有「本地豆包」路线要 | 本机 `%USERPROFILE%\.dsh\plugins\dsh-doubao-painter`（CDP 驱动豆包） |
+| **node ≥ 22** | 只有「本地豆包」路线要 | painter 是 Node 写的 |
+| **生图 API 的 key** | 只有「API」路线要 | 任意 OpenAI 兼容接口（OpenAI / 硅基流动 / 中转站） |
 
-> 如果豆包装在别处：拿到主程序完整路径，稍后填进 `app_exe`。
-> painter ≥ 0.5.2 会自动探测 `D:\Doubao\app\Doubao.exe` 和 `%LOCALAPPDATA%\Doubao\Application\app\Doubao.exe`；
-> 更老的版本只认 `D:\Doubao\app\Doubao.exe`，那就必须填 `app_exe`。
-
----
-
-## 2. 装插件
-
-```
-<AstrBot>/data/plugins/astrbot_plugin_doubao_paint/
-├── main.py
-├── metadata.yaml
-├── _conf_schema.json
-├── README.md
-├── SETUP-FOR-AI.md
-└── logo.png
-```
-
-放好后**完整重启 AstrBot**（不是重载插件）。日志里应有：
-
-```
-Loading plugin astrbot_plugin_doubao_paint ...
-Added llm tool: doubao_paint
-Added llm tool: doubao_paint_status
-[DoubaoPaint] 已启动：painter=...\dsh-doubao-painter\tools\paint.mjs｜输出=...｜Timeout=240s｜读状态=True
-[DoubaoPaint] 角色参考图：Q版=...｜成熟版=...
-```
-
-`painter=` 显示「（没找到）」就是 `painter_dir` 配错了。
+> 两条路线**二选一**，配好哪条都能用；以后想换，改 `image_backend` 再重启即可。
 
 ---
 
-## 3. 配置
+## 1. 开工前必须先问使用者（别自己决定）
 
-文件：`<AstrBot>/data/config/astrbot_plugin_doubao_paint_config.json`
+**第一句就问这个，问清楚再动手：**
+
+> 「生图想用 **① 本地豆包**（免费、要装豆包桌面版），还是 **② 生图模型 API**（填 key 就能用、按量花钱）？」
+
+然后按他的选择走下面某一条：
+
+- 选 **① 本地豆包** → 走第 3 节
+- 选 **② 生图模型 API** → 走第 4 节
+
+顺便确认两件事：
+
+1. **要不要「画她自己」**？要的话得放角色设定图（Q 版 / 成熟版），没有图也能用，只是不如她本人。
+2. **要不要读陪伴插件状态**（情绪/精力/天气）？默认读，只读、不改。不想让插件碰就设 `read_state: false`。
+
+**配完必须回报**：走的是哪条路线、后端/模型名、参考图有没有、最后一次真实出图成功没有。
+
+---
+
+## 2. 插件能干什么（配之前先让使用者知道）
+
+1. **一句话出图**：QQ 里说「画一张……」，她自己调 `doubao_paint`，图直接发回当前会话。
+2. **图生图（三种时序都支持）**
+   - 图 + 需求一起发 → 用这条消息里的图当参考图；
+   - 先发图、后说需求 → 记住最近 30 分钟发过的图；
+   - 先说需求、后发图 → 先把需求挂起（默认 5 分钟），收到图自动接着画并回发。
+3. **画她自己**：内置 Q 版 / 成熟版角色设定图；说「画一张你现在的状态」时用角色图当参考，
+   并把**当前时间（白天/夜晚）、真实天气、情绪/精力/身体**放到提示词最前面，强制画面光线对得上。
+4. **两种后端**：本地豆包（`doubao`）或任意 OpenAI 兼容生图 API（`openai`）。
+5. **自检工具** `doubao_paint_status`：查后端、painter、node、端口、参考图、状态读取。
+
+---
+
+## 3. 路线①：本地豆包（免费）
+
+### 3.1 检查
+
+| 检查 | 位置 / 命令 | 判定 |
+| --- | --- | --- |
+| node ≥ 22 | `node --version` | 打印 v22+ |
+| 豆包已装 | `%LOCALAPPDATA%\Doubao\Application\app\Doubao.exe` 或 `D:\Doubao\app\Doubao.exe` | 文件存在（**app 子目录里的主程序**，不是 launcher） |
+| 豆包已登录 | 手动打开豆包，能聊天/生图 | 已登录 |
+| painter | `%USERPROFILE%\.dsh\plugins\dsh-doubao-painter\tools\paint.mjs` | 文件存在 |
+
+### 3.2 配置（`data/config/astrbot_plugin_doubao_paint_config.json`）
 
 ```json
 {
+  "image_backend": "doubao",
   "painter_dir": "",
   "node_path": "node",
   "app_exe": "",
@@ -77,6 +82,8 @@ Added llm tool: doubao_paint_status
   "out_dir": "",
   "keep_days": 7,
   "recent_image_minutes": 30,
+  "pending_image_minutes": 5,
+  "auto_paint_on_next_image": true,
   "read_state": true,
   "state_plugin": "astrbot_plugin_private_companion",
   "state_read_all_files": false,
@@ -85,128 +92,126 @@ Added llm tool: doubao_paint_status
 }
 ```
 
-- `painter_dir` 留空 = `%USERPROFILE%\.dsh\plugins\dsh-doubao-painter`。
-- `app_exe` 留空 = 让 painter 自己探测；探测不到再填完整路径。
-- 其余保持默认即可。
+- `painter_dir` 留空 = 自动用 `%USERPROFILE%\.dsh\plugins\dsh-doubao-painter`。
+- `app_exe` 留空 = painter 自动探测（D 盘 / `%LOCALAPPDATA%` / Program Files），探测不到再填完整路径。
+
+### 3.3 验证
+
+1. 在 QQ 里说「豆包画画能用吗？」→ 她调 `doubao_paint_status`，应能看到 painter 路径、node 版本、
+   `豆包 CDP 9225: ❌ 没在跑（第一次画图时会自动拉起来）`（没跑是正常的）。
+2. 说「**画一张你现在的状态**」→ 等 20~90 秒（第一次要拉起豆包，会更久），应收到一张图。
+3. 说「画一只戴墨镜的橘猫」→ 只带这句话，不带时间/状态（验证「只在她自己时才带状态」）。
 
 ---
 
-## 4. 放角色参考图
+## 4. 路线②：生图模型 API（OpenAI 兼容）
+
+### 4.1 先问清楚
+
+> 「你的接口是哪个？给我 **base 地址（到 /v1 为止）**、**key**、**模型名**、**尺寸**。」
+
+常见写法：
+
+| 服务 | api_base | image_model 例子 |
+| --- | --- | --- |
+| OpenAI | `https://api.openai.com/v1` | `gpt-image-1` |
+| 硅基流动 | `https://api.siliconflow.cn/v1` | `Kwai-Kolors/Kolors` |
+| 各种中转站 | 服务商给的地址 | 服务商给的模型名 |
+
+### 4.2 配置
+
+```json
+{
+  "image_backend": "openai",
+  "api_base": "https://api.siliconflow.cn/v1",
+  "api_key": "sk-xxxx",
+  "image_model": "Kwai-Kolors/Kolors",
+  "image_size": "1024x1024",
+  "image_count": 1,
+  "use_edits": true,
+  "keep_days": 7,
+  "recent_image_minutes": 30,
+  "pending_image_minutes": 5,
+  "auto_paint_on_next_image": true,
+  "read_state": true,
+  "state_plugin": "astrbot_plugin_private_companion",
+  "state_read_all_files": false,
+  "self_ref_cute": "",
+  "self_ref_mature": ""
+}
+```
+
+- 纯文字 → `POST {api_base}/images/generations`（JSON）。
+- 带参考图 → `POST {api_base}/images/edits`（multipart，字段 `image`）。
+  **接口不支持 edits 就把 `use_edits` 设 false**，参考图会被忽略，只按文字画。
+- 返回要 OpenAI 那套：`{"data":[{"b64_json":"..."}]}` 或 `{"data":[{"url":"..."}]}`。
+- `image_size` 留空就不传，能避开「尺寸参数不认」的坑。
+
+### 4.3 验证
+
+1. 「豆包画画能用吗？」→ 自检里应显示后端 `openai`（不显示豆包端口）。
+2. 「画一张蓝色小鲸鱼」→ 能收到图（失败会把接口原话回给使用者）。
+3. 「照这张画成水彩」（带图发）→ 看日志/回包是否走 `edits`。
+
+---
+
+## 5. 角色参考图（两条路线都要）
 
 ```
 <AstrBot>/data/plugin_data/astrbot_plugin_doubao_paint/refs/
-├── self_cute.png      ← Q 版（最好三视图：正面/侧面/背面）
+├── self_cute.png      ← Q 版（最好三视图）
 └── self_mature.jpg    ← 成熟版
 ```
 
-- 文件名带 `cute` / `q版` / `chibi` → 认成 Q 版；带 `mature` / `成熟` → 成熟版。
-- 也可以在配置里直接写绝对路径（`self_ref_cute` / `self_ref_mature`）。
-- 没有图也能用，只是「画你自己」时没有形象参考。
+- 文件名带 `cute` / `q版` / `chibi` → Q 版；带 `mature` / `成熟` → 成熟版。
+- 也可以直接在配置里写绝对路径（`self_ref_cute` / `self_ref_mature`）。
+- 没有图也能画，只是「画你自己」时没有形象参考。
 
 ---
 
-## 5. 验证（照顺序）
+## 6. 时间 / 天气 / 状态（只在「画她自己」时带）
 
-### 5.1 自检（30 秒）
-
-在 QQ 里对她说：「豆包画画能用吗？」→ 她调 `doubao_paint_status`，应当回：
-
-```
-painter 脚本：...\tools\paint.mjs
-node 版本：v22+ / v26
-豆包 CDP 9225：❌ 没在跑（第一次画图时会自动拉起来）   ← 没跑也正常
-角色图：Q版=...｜成熟版=...
-状态读取：...（一段 key=value）
-```
-
-- `painter 脚本：❌ 没找到` → 回去改 `painter_dir`。
-- `node 不可用` → 填 `node_path` 的完整路径。
-- `状态读取：（没读到）` → 陪伴插件没装/没数据，不影响画图。
-
-### 5.2 真实生成（1~2 分钟，必须有）
-
-在 QQ 里说：**「画一张你现在的状态」**
-
-期望：
-1. 等 20~90 秒（第一次要拉起豆包，会更久）；
-2. QQ 里收到一张图；
-3. 日志：
-
-```
-[DoubaoPaint] 已启动：...
-```
-以及没有 `[DoubaoPaint] 生成失败`。
-
-判定三条：**图收到了**、**形象能对上参考图**、**画面里有当前状态/天气的影子**（有角色图 + 状态才成立）。
-
-### 5.3 状态只在「画她自己」时生效（天气读 v2 sqlite）
-
-- 说「画一张你现在的状态」→ 提示词最前面会带：`现在是 …（下午）/ 天气 …` + 硬性要求「白天就画白天」，
-  后面跟着情绪/精力/身体。
-- 说「画一只戴墨镜的橘猫」→ 只有这句话，不带时间、不带状态。
-
-### 5.4 四条支路（各 1 分钟）
-
-1. **图 + 需求一起发**：发一张照片并说「照这个画成水彩」→ 应当是用这张照片当参考图。
-2. **先图后话**：先发一张图，隔 10 秒再说「照这张画成 Q 版」→ 插件用缓存里最近那张。
-3. **先话后图**：先说「照这张画成水彩」（不带图）→ 她回「把图发来」；再发图 →
-   插件**自动接着画**并直接把图发回来（`pending_image_minutes` 默认 5 分钟内有效）。
-4. **纯文字**：「画一只戴墨镜的橘猫」→ 不带参考图，直接文生图。
+- 只有 `self_portrait=true`（用户说「画你自己 / 你现在的状态」）才把这三样放进提示词最前面。
+- 时间写成「2026-11-08 15:34（下午）」，并要求「白天就画白天的光，别画成深夜」。
+- 天气从陪伴插件 v2 的 sqlite（`proactive_weather_samples`，qweather 采样）读**真实值**：
+  `阴 28℃（湿度 67%）`——**不包含地区**，避免把使用者的定位写进提示词。
+- 读不到天气就写「天气未知（不要自己编）」。
+- 情绪/精力来自 `daily_state`；快照不是当天的会标「（上次记录 11-08）」，当天才有「睡眠」。
 
 ---
 
-## 5.5 想用别的生图模型（可选）
-
-把 `image_backend` 改成 `openai`，然后填：
-
-| 键 | 例子 | 说明 |
-| --- | --- | --- |
-| `api_base` | `https://api.siliconflow.cn/v1` | 到 `/v1` 为止，别带 `/images/generations` |
-| `api_key` | `sk-xxx` | 只存本机 |
-| `image_model` | `Kwai-Kolors/Kolors` | 服务商给的模型名 |
-| `image_size` | `1024x1024` | 留空不传 |
-| `image_count` | 1 | 1~4 |
-| `use_edits` | true | 带参考图走 `/images/edits`；不支持就关 |
-
-验证：说「画一张蓝色小鲸鱼」，能收到图；再说「照这张画成水彩」（带图），看日志是不是走 `edits`。
-
-## 6. 排查表
+## 7. 排查表
 
 | 症状 | 原因 | 修法 |
 | --- | --- | --- |
-| `画不了：没找到…paint.mjs` | `painter_dir` 错 / 没装 painter | 改成真实路径 |
-| `找不到 node（node）` | PATH 里没有 node | `node_path` 填完整路径（`where node` 查） |
-| `画失败了：超时` | 豆包启动慢 / 没登录 / 卡住 | 先把 `timeout_seconds` 提到 300，手动打开豆包登一次 |
-| `画失败了：... ECONNREFUSED` / `CDP` 相关 | 豆包没带调试端口、或端口被占 | 关掉豆包让它被自动拉起；或改 `cdp_port` |
-| 图发不出去 | 平台侧限制 | 看 AstrBot 日志里的发送错误；图在 `images/` 里能手动拿 |
-| 画出来不像她 | 参考图没放 / 名字没对上 | 按第 4 节命名；或直接配绝对路径 |
-| 图右下角有水印 | 豆包免费套餐 | 正常现象，本地去不干净；要无水印就换会员账号 |
-| 状态是空的 | 陪伴插件没有该字段 | 正常，画图不依赖它 |
-| 一直排队 | 有人在画（插件加了锁） | 等前一张画完 |
+| `画不了：没找到…paint.mjs` | painter 没装 / `painter_dir` 错 | 改路径或装 painter |
+| `找不到 node（node）` | PATH 没 node | `node_path` 填完整路径 |
+| `画失败了：超时` | 豆包启动慢/没登录 | 调大 `timeout_seconds`，手动登一次豆包 |
+| `CDP` 相关错误 | 豆包没带调试端口 / 端口被占 | 关掉豆包让它被拉起，或改 `cdp_port` |
+| 接口 401/403 | key 错 / 没权限 | 核对 `api_key`、模型名 |
+| 接口 400 参数错 | 尺寸/`n`/`response_format` 不认 | 看返回原话，`image_size` 留空试试 |
+| 图右下角有水印 | 豆包免费套餐 | 正常现象；要干净原图需会员账号 |
+| 画出来不像她 | 参考图没放/名字没对上 | 按第 5 节命名或配绝对路径 |
+| 一直排队 | 有人在画（有并发锁） | 等前一张画完 |
+| 普通画图也带了状态 | 走了 `self_portrait` | 确认模型调用时 `self_portrait=false` |
 
 ---
 
-## 7. 配完要告诉使用者什么（照抄改数字）
+## 8. 配完要告诉使用者什么
 
 > 配好了。现在：
-> - 在 QQ 里说「画一张……」她就会用本机豆包出图，图直接发回来；
-> - 说「画一张你现在的状态」，会带上她的角色设定图 + 当前情绪/天气来画；
-> - 图 + 需求一起发能图生图；先发图、过一会儿再说「照这个画」也行（记住 30 分钟）；
-> - 一次生成大概 20~90 秒，期间要等；同时只能画一张；
-> - 生成的图存在插件数据目录里，7 天后自动删。
+> - 你在 QQ 里说「画一张……」，她就会出图并直接发回来；
+> - 走的是 **① 本地豆包**（免费，需要豆包开着）/ **② 生图 API（模型 xxx）**；
+> - 图 + 需求一起发、先图后话、先话后图都行；
+> - 说「画一张你现在的状态」，会带她的角色图 + 当前时间/天气/情绪，画出来光线也对得上；
+> - 一次生成大概 20~90 秒（API 通常更快），同时只能画一张；
+> - 图存在 `plugin_data/astrbot_plugin_doubao_paint/images/`，7 天自动删。
 
 ---
-
-## 8. 关于水印（必须告诉使用者）
-
-- 插件取的是豆包 CDN 的 **cgen 原图**（不是缩略图），上游 painter 也是这么做的。
-- **免费套餐账号的 cgen 原图仍带「豆包 AI生成」水印**（2026-11 实测）：
-  其它 CDN 变体全部 403、预览层没有下载按钮、本地去水印会留鬼影。
-- **要无水印就得用会员账号**，插件不用改配置。
 
 ## 9. 边界
 
-- **只走本机豆包**：不调用任何在线生图 API，不上传提示词到第三方（豆包本身除外）。
-- **只读状态**：读陪伴插件的 `companions.json`，不改不写；`state_read_all_files` 默认关。
-- **不保证每次都像**：豆包是生成模型，参考图只提高一致性，不是 100% 复刻。
-- **豆包账号风险**：高频生图可能触发豆包的限制，这是豆包侧的规则，插件管不了。
+- 本地豆包：不调用任何在线生图 API，但**免费套餐的原图带「豆包 AI生成」水印**（会员才干净）。
+- API 路线：提示词会发给你选的模型服务商，隐私按那家的条款走。
+- **只读**陪伴插件的状态（`companions.json` + v2 sqlite），不改不写；`state_read_all_files` 默认关。
+- 参考图只提高一致性，不保证 100% 复刻。

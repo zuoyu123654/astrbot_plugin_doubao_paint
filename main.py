@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.2.1"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -377,7 +377,7 @@ class DoubaoPaintPlugin(Star):
                     cond = str(data.get("condition") or "").strip()
                     temp = data.get("temperature_c")
                     hum = data.get("humidity_pct")
-                    place = str(data.get("role_location") or "").strip()
+                    # 地区不往外带：只给天气本身，免得把用户的定位写进提示词
                     if not cond and temp is None:
                         continue
                     body = ""
@@ -387,7 +387,7 @@ class DoubaoPaintPlugin(Star):
                         body += (" " if body else "") + f"{temp:g}℃"
                     if isinstance(hum, (int, float)):
                         body += f"（湿度 {hum:g}%）"
-                    text = (place + " · " + body) if place else body
+                    text = body
                     break
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("[DoubaoPaint] 读 v2 天气失败：%s", exc)
