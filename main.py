@@ -37,7 +37,7 @@ from astrbot.api.message_components import Image
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.1.1"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 SELF_HINTS = (
