@@ -2,7 +2,7 @@
 
 把本机「豆包」桌面客户端的生图能力接进 AstrBot：
 用户在 QQ 里说「画一张……」，模型调用 `doubao_paint`，插件调
-dsh-doubao-painter 的命令行入口（lib/tools/paint.mjs）让豆包出图，
+插件自己用 CDP（调试端口）驱动豆包出图，不再调用 dsh-doubao-painter，
 拿到本地无水印原图后，直接把图发回当前会话。
 
 三个它专门解决的问题：
@@ -13,7 +13,7 @@ dsh-doubao-painter 的命令行入口（lib/tools/paint.mjs）让豆包出图，
   3. **状态与天气**：读 `astrbot_plugin_private_companion` 的 plugin_data
      （只读、文件名白名单），把此刻的情绪/精力/天气等写进给豆包的提示词。
 
-不依赖 DSH 在线：直接跑 painter 的命令行（node）。
+不依赖 DSH：插件内置 CDP 客户端，直接和豆包桌面端说话。
 """
 
 from __future__ import annotations
@@ -34,10 +34,12 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Image, Plain
+
+from .doubao_cdp import DoubaoClient, find_doubao_exe
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.6.2"
+PLUGIN_VERSION = "0.7.0"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -83,9 +85,13 @@ class DoubaoPaintPlugin(Star):
         self.context = context
         cfg = config if isinstance(config, dict) else {}
 
+        # 已经不需要 dsh-doubao-painter 了：插件自己用 CDP 驱动豆包。
+        # painter_dir / node_path 只为兼容老配置保留（不再使用）。
         self.painter_dir = str(cfg.get("painter_dir", "") or "").strip()
         self.node_path = str(cfg.get("node_path", "") or "").strip() or "node"
-        self.app_exe = str(cfg.get("app_exe", "") or "").strip()
+        self.app_exe = str(cfg.get("app_exe", "") or "").strip() or find_doubao_exe()
+        self.auto_launch = bool(cfg.get("auto_launch_doubao", True))
+        self.restart_when_no_cdp = bool(cfg.get("restart_when_no_cdp", True))
         try:
             self.cdp_port = int(cfg.get("cdp_port", 9225) or 9225)
         except (TypeError, ValueError):
@@ -178,8 +184,8 @@ class DoubaoPaintPlugin(Star):
     async def initialize(self) -> None:
         self._cleaner = asyncio.create_task(self._cleanup_loop())
         logger.info(
-            "[DoubaoPaint] 已启动：painter=%s｜输出=%s｜Timeout=%ss｜读状态=%s",
-            self._painter_script() or "（没找到）",
+            "[DoubaoPaint] 已启动：豆包=%s｜输出=%s｜Timeout=%ss｜读状态=%s",
+            self.app_exe or "（没找到豆包）",
             self.image_dir,
             self.timeout_sec,
             self.read_state,
@@ -232,63 +238,18 @@ class DoubaoPaintPlugin(Star):
     DENY_TEXT = "这个只给老大用，你别乱点。"
 
     # ── 路径探测 ────────────────────────────────────────────────────────
-    def _painter_script(self) -> Path | None:
-        base = Path(
-            self.painter_dir
-            or (Path(os.environ.get("USERPROFILE", "~")) / ".dsh" / "plugins" / "dsh-doubao-painter")
-        )
-        for rel in ("tools/paint.mjs", "lib/tools/paint.mjs"):
-            p = base / rel
-            if p.is_file():
-                return p
-        return None
+    def _doubao_exe(self) -> str:
+        """豆包主程序路径；配置里填了就优先用配置。"""
 
-    async def _describe_image(self, path: str) -> str:
-        """让多模态模型描述参考图内容（缓存 30 分钟；不支持就返回空）。"""
+        if self.app_exe and Path(self.app_exe).is_file():
+            return self.app_exe
+        return find_doubao_exe()
 
-        if not self.read_image or not path or not Path(path).is_file():
-            return ""
-        try:
-            stat = Path(path).stat()
-            cache_key = f"{path}|{int(stat.st_mtime)}|{stat.st_size}"
-            cache = getattr(self, "_image_desc_cache", None)
-            if cache is None:
-                cache = {}
-                self._image_desc_cache = cache
-            hit = cache.get(cache_key)
-            if hit and time.time() - hit[0] < 1800:
-                return hit[1]
-
-            provider = None
-            try:
-                if self.caption_provider:
-                    provider = self.context.get_provider_by_id(self.caption_provider)
-                if provider is None:
-                    provider = self.context.get_using_provider()
-            except Exception:  # noqa: BLE001
-                provider = None
-            if provider is None:
-                return ""
-
-            resp = await provider.text_chat(
-                prompt=(
-                    "用 1~2 句中文描述这张图：主体是什么、在做什么、主要颜色、光线、场景。"
-                    "只输出描述，不要客套话。"
-                ),
-                image_urls=[str(path)],
-            )
-            text = str(getattr(resp, "completion_text", "") or "").strip()
-            text = text.replace("\n", " ")[:120]
-            cache[cache_key] = (time.time(), text)
-            if len(cache) > 50:
-                for k in list(cache)[:20]:
-                    cache.pop(k, None)
-            if text:
-                logger.info("[DoubaoPaint] 参考图描述：%s", text)
-            return text
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[DoubaoPaint] 读图失败（忽略）：%s", exc)
-            return ""
+    def _doubao_ready(self) -> tuple[bool, str]:
+        exe = self._doubao_exe()
+        if exe and Path(exe).is_file():
+            return True, exe
+        return False, f"找不到豆包主程序：{exe}（在插件配置里填 app_exe）"
 
     def _ref_files(self) -> list[Path]:
         exts = (".png", ".jpg", ".jpeg", ".webp")
@@ -889,11 +850,11 @@ class DoubaoPaintPlugin(Star):
                 留空 = 自动挑：先看话里有没有提到文件名，没有就用「默认」那张。
         """
 
-        # 只有走本地豆包才需要 painter；API 后端不需要
+        # 只有走本地豆包才需要豆包程序；API 后端不需要
         if self.backend != "openai":
-            target = self._painter_script()
-            if target is None:
-                return "画不了：没找到 dsh-doubao-painter 的 tools/paint.mjs（检查 painter_dir 配置）"
+            ok, detail = self._doubao_ready()
+            if not ok:
+                return "画不了：" + detail
 
         body = (prompt or "").strip()
         if not body:
@@ -967,7 +928,7 @@ class DoubaoPaintPlugin(Star):
         if image_note:
             body += image_note
 
-        # 3) 调 painter（一次只能跑一个，加锁）
+        # 3) 调豆包（一次只能跑一个，加锁）
         async with self._lock:
             ok, err, files = await self._generate(body, refs)
         if not ok or not files:
@@ -1095,63 +1056,44 @@ class DoubaoPaintPlugin(Star):
         return True, "", files
 
     async def _run_painter(self, prompt: str, refs: list[str]) -> tuple[bool, str, list[str]]:
-        script = self._painter_script()
-        if script is None:
-            return False, "没找到 paint.mjs", []
-        payload: dict[str, Any] = {
-            "prompt": prompt,
-            "outDir": str(self.image_dir),
-            "timeoutMs": self.timeout_sec * 1000,
-            "cdpPort": self.cdp_port,
-            "newChat": True,
-        }
-        if refs:
-            payload["refImages"] = refs
-        if self.app_exe:
-            payload["appExe"] = self.app_exe
-        cmd = [self.node_path, str(script), "--stdin-json", "--json"]
-        kwargs: dict[str, Any] = {}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **kwargs,
-            )
-            out_b, err_b = await asyncio.wait_for(
-                proc.communicate(json.dumps(payload, ensure_ascii=False).encode("utf-8")),
-                timeout=self.timeout_sec + 30,
-            )
-        except asyncio.TimeoutError:
-            return False, f"超时（>{self.timeout_sec}s）", []
-        except FileNotFoundError:
-            return False, f"找不到 node（{self.node_path}）", []
-        except Exception as exc:  # noqa: BLE001
-            return False, str(exc), []
+        """用自带的 CDP 客户端驱动豆包出图（不再调用 dsh-doubao-painter）。"""
 
-        text = (out_b or b"").decode("utf-8", "ignore").strip()
-        err = (err_b or b"").decode("utf-8", "ignore").strip()
-        # paint.mjs 的 --json 是「美化过」的多行 JSON，不能按行解析
-        data = None
+        ok, detail = self._doubao_ready()
+        if not ok:
+            return False, detail, []
+
+        client = DoubaoClient(
+            port=self.cdp_port,
+            app_exe=detail,
+            timeout=self.timeout_sec,
+            out_dir=self.image_dir,
+            auto_launch=self.auto_launch,
+            restart_when_no_cdp=self.restart_when_no_cdp,
+        )
         try:
-            data = json.loads(text)
-        except Exception:  # noqa: BLE001
-            start, end = text.find("{"), text.rfind("}")
-            if start >= 0 and end > start:
-                try:
-                    data = json.loads(text[start : end + 1])
-                except Exception:  # noqa: BLE001
-                    data = None
-        if not data:
-            return False, (err or text)[-300:], []
-        if not data.get("ok"):
-            return False, str(data.get("error") or err)[-300:], []
-        files = [str(f) for f in (data.get("files") or []) if f]
-        if not files and data.get("items"):
-            files = [f for it in data["items"] for f in (it.get("files") or [])]
+            result = await client.generate(
+                prompt,
+                ref_images=[str(r) for r in refs] if refs else None,
+                new_chat=True,
+                timeout=self.timeout_sec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DoubaoPaint] 豆包出图失败：%s", exc)
+            return False, str(exc)[:300], []
+        finally:
+            try:
+                await client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        files = [str(f) for f in (result.get("files") or []) if Path(str(f)).is_file()]
+        if not files:
+            return False, "豆包没返回可用的图片", []
+        logger.info(
+            "[DoubaoPaint] 出图成功：%s 张｜%s",
+            len(files),
+            "原图" if result.get("resolution") == "original" else "缩略图",
+        )
         return True, "", files
 
     @filter.llm_tool(name="doubao_now_playing")
@@ -1193,26 +1135,16 @@ class DoubaoPaintPlugin(Star):
     # ── 自检工具 ────────────────────────────────────────────────────────
     @filter.llm_tool(name="doubao_paint_status")
     async def doubao_paint_status(self, event: AstrMessageEvent) -> str:
-        """检查豆包画画能不能用：painter 脚本、node、豆包是否在调试端口上。"""
+        """检查豆包画画能不能用：豆包程序、调试端口、参考图、状态读取。"""
         if not self._can_use(event):
             return self.DENY_TEXT
 
-
-        script = self._painter_script()
+        exe_ok, exe = self._doubao_ready()
         lines = [
-            f"painter 脚本：{script or '❌ 没找到'}",
-            f"node：{self.node_path}",
+            f"豆包程序：{exe if exe_ok else '❌ ' + exe}",
+            f"驱动方式：自带 CDP（不依赖 dsh-doubao-painter）",
+            f"自动拉起豆包：{'开' if self.auto_launch else '关'}",
         ]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                self.node_path, "--version",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            out_b, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-            lines.append("node 版本：" + (out_b or b"").decode("utf-8", "ignore").strip())
-        except Exception as exc:  # noqa: BLE001
-            lines.append(f"node 不可用：{exc}")
 
         try:
             reader, writer = await asyncio.wait_for(

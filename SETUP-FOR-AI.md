@@ -16,8 +16,8 @@
 | **AstrBot ≥ 4.17** | 必需 | 平台必须是 **aiocqhttp（OneBot v11）**，否则发不了图 |
 | QQ空间 / QQ资料 等 | 不需要 | 本插件不依赖它们 |
 | **豆包桌面客户端** | 只有「本地豆包」路线要 | 装好并**已登录** |
-| **dsh-doubao-painter** | 只有「本地豆包」路线要 | 本机 `%USERPROFILE%\.dsh\plugins\dsh-doubao-painter`（CDP 驱动豆包） |
-| **node ≥ 22** | 只有「本地豆包」路线要 | painter 是 Node 写的 |
+| ~~dsh-doubao-painter~~ | **不再需要** | 插件内置 CDP 客户端（`doubao_cdp.py`），自己驱动豆包 |
+| ~~node ≥ 22~~ | **不再需要** | 全 Python 实现 |
 | **生图 API 的 key** | 只有「API」路线要 | 任意 OpenAI 兼容接口（OpenAI / 硅基流动 / 中转站） |
 
 > 两条路线**二选一**，配好哪条都能用；以后想换，改 `image_backend` 再重启即可。
@@ -82,7 +82,7 @@
 | node ≥ 22 | `node --version` | 打印 v22+ |
 | 豆包已装 | `%LOCALAPPDATA%\Doubao\Application\app\Doubao.exe` 或 `D:\Doubao\app\Doubao.exe` | 文件存在（**app 子目录里的主程序**，不是 launcher） |
 | 豆包已登录 | 手动打开豆包，能聊天/生图 | 已登录 |
-| painter | `%USERPROFILE%\.dsh\plugins\dsh-doubao-painter\tools\paint.mjs` | 文件存在 |
+| 豆包调试端口 | 画图时自动开 9225 | 不用手动管 |
 
 ### 3.2 配置（`data/config/astrbot_plugin_doubao_paint_config.json`）
 
@@ -289,6 +289,19 @@
   别人触发时她只回「这个只给老大用，你别乱点。」。
 - 要放开：`whitelist` + `allowed_users: ["QQ号"]`；或 `everyone`（谁都能画，慎用）。
 - 配完记得跟使用者确认一句：「默认只有你能用，别人要画需要你自己加白名单。」
+
+## 6.5 本地豆包怎么驱动（0.7.0 起，不再依赖 painter）
+
+- 插件内置 `doubao_cdp.py`：找豆包主程序 → 没调试端口就带 `--remote-debugging-port` 重开 →
+  连 `chrome://doubao-chat/chat` → 新对话 → 输入提示词 → 回车 → 等新图 → 点开预览拿 `cgen` 原图 → 下载。
+- **豆包按意图决定生不生图**：提示词里没有「画/生成/插画/图片」这类词时，插件会自动加「画一张图：」前缀。
+  没有这个前缀，豆包会回一段「可直接用的绘图提示词」文字，然后超时（实测踩过）。
+- 拿原图失败会重试两次；只拿到 384 缩略图会再试一次；仍失败才退回缩略图（日志会写）。
+- 配置：`cdp_port`、`app_exe`、`auto_launch_doubao`、`restart_when_no_cdp`。
+- `painter_dir` / `node_path` 已废弃，留着只为兼容老配置。
+
+验证：说「画一只在窗台打盹的橘猫」→ 30 秒左右出图，日志有
+`[DoubaoPaint] 出图成功：N 张｜原图`，尺寸应 ≥1024（实测 1728×2304 / 2048×2048）。
 
 ## 7. 排查表
 
