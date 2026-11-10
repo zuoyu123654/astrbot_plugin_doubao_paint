@@ -39,7 +39,7 @@ from .doubao_cdp import DoubaoClient, find_doubao_exe
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.7.0"
+PLUGIN_VERSION = "0.7.1"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -91,6 +91,10 @@ class DoubaoPaintPlugin(Star):
         self.node_path = str(cfg.get("node_path", "") or "").strip() or "node"
         self.app_exe = str(cfg.get("app_exe", "") or "").strip() or find_doubao_exe()
         self.auto_launch = bool(cfg.get("auto_launch_doubao", True))
+        # 豆包出一张要 1~2 分钟，而 AstrBot 的工具调用有 120 秒上限。
+        # 所以默认「先回一句在画了，画完再发图」，避免工具被超时掐掉。
+        self.async_paint = bool(cfg.get("async_paint", True))
+        self._paint_tasks: dict[str, asyncio.Task] = {}
         self.restart_when_no_cdp = bool(cfg.get("restart_when_no_cdp", True))
         try:
             self.cdp_port = int(cfg.get("cdp_port", 9225) or 9225)
@@ -353,6 +357,38 @@ class DoubaoPaintPlugin(Star):
             return
         logger.info("[DoubaoPaint] 收到后补的图，接着画：%s", str(task.get("prompt"))[:40])
         asyncio.create_task(self._paint_and_send(task, image_path))
+
+    async def _paint_then_send(
+        self, umo: str, body: str, refs: list[str]
+    ) -> None:
+        """后台画完再把图发回会话（不受工具 120 秒超时影响）。"""
+
+        started = time.time()
+        try:
+            async with self._lock:
+                ok, err, files = await self._generate(body, refs)
+        except Exception as exc:  # noqa: BLE001
+            ok, err, files = False, str(exc), []
+        elapsed = time.time() - started
+
+        if not ok or not files:
+            logger.warning("[DoubaoPaint] 后台画图失败（%.1fs）：%s", elapsed, err)
+            try:
+                await self.context.send_message(
+                    umo,
+                    MessageChain([Plain(f"画失败了：{str(err or '没拿到图片')[:120]}")]),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+        logger.info("[DoubaoPaint] 后台画图完成（%.1fs）：%s", elapsed, Path(files[0]).name)
+        try:
+            await self.context.send_message(
+                umo, MessageChain([Image.fromFileSystem(files[0])])
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DoubaoPaint] 后台发图失败：%s", exc)
 
     async def _paint_and_send(self, task: dict[str, Any], image_path: str) -> None:
         """后台把「先发的需求 + 后发的图」画完，再发回同一个会话。"""
@@ -928,7 +964,24 @@ class DoubaoPaintPlugin(Star):
         if image_note:
             body += image_note
 
-        # 3) 调豆包（一次只能跑一个，加锁）
+        # 3) 异步模式：豆包太慢（1~2 分钟），先回一句，画完再发图
+        if self.async_paint and self.backend != "openai":
+            umo = str(event.unified_msg_origin or "")
+            running = self._paint_tasks.get(umo)
+            if running is not None and not running.done():
+                return "上一张还在画，等它出来再画下一张。"
+            task = asyncio.create_task(self._paint_then_send(umo, body, refs))
+            self._paint_tasks[umo] = task
+
+            def _cleanup(_t: asyncio.Task, key: str = umo) -> None:
+                if self._paint_tasks.get(key) is _t:
+                    self._paint_tasks.pop(key, None)
+
+            task.add_done_callback(_cleanup)
+            logger.info("[DoubaoPaint] 已排上后台画图：%s", body[:40])
+            return "好，在画了，画完直接把图发给你（大概一两分钟）。"
+
+        # 3') 同步模式（API 后端 / 或关掉 async_paint）
         async with self._lock:
             ok, err, files = await self._generate(body, refs)
         if not ok or not files:

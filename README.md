@@ -129,6 +129,12 @@
 - 返回格式要 OpenAI 那套：`{"data":[{"b64_json": "..."}]}` 或 `{"data":[{"url": "..."}]}`。
 - 豆包后端（`image_backend: doubao`）仍然照旧，两套互不影响。
 
+## 为什么要「先回一句在画了」
+
+豆包出一张图要 1~2 分钟，而 AstrBot 的工具调用有 **120 秒上限**——同步等一定会被掐断（日志里是 `tool doubao_paint execution timeout after 120 seconds`）。
+所以默认 `async_paint: true`：工具立刻返回「在画了」，画完由后台把图直接发回会话。
+关掉它（`async_paint: false`）就会退回同步等待，只适合 API 后端那种十几秒出图的。
+
 ## 本地豆包怎么驱动（v0.7.0 起）
 
 插件自己连豆包的调试端口（默认 9225），流程：

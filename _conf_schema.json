@@ -89,6 +89,11 @@
     "description": "一次生成最多等多少秒（默认 240）。豆包出图一般 20~90 秒，四张图会更久。",
     "default": 240
   },
+  "async_paint": {
+    "type": "bool",
+    "description": "后台画图：先回一句「在画了」，画完再把图发过来（豆包要 1~2 分钟，工具调用有 120 秒上限，关掉容易被掐断）。",
+    "default": true
+  },
   "out_dir": {
     "type": "string",
     "description": "生成的图存哪。留空 = 插件数据目录下的 images/。",
