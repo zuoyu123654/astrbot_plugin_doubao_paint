@@ -103,6 +103,92 @@ def _kill_doubao() -> bool:
         return False
 
 
+def _doubao_window_handles() -> list[int]:
+    """列出所有属于 Doubao.exe 的可见顶层窗口句柄。"""
+
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handles: list[int] = []
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def _cb(hwnd, _lparam):  # noqa: ANN001
+            try:
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if not pid.value:
+                    return True
+                proc = kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED_INFORMATION
+                if not proc:
+                    return True
+                buf = ctypes.create_unicode_buffer(1024)
+                size = wintypes.DWORD(1024)
+                ok = kernel32.QueryFullProcessImageNameW(proc, 0, buf, ctypes.byref(size))
+                kernel32.CloseHandle(proc)
+                if ok and buf.value.lower().endswith("doubao.exe"):
+                    handles.append(int(hwnd))
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(_cb), 0)
+        return handles
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def minimize_doubao_windows() -> int:
+    """把豆包的窗口最小化（Electron 不认 STARTUPINFO，得用 ShowWindow 补一刀）。"""
+
+    if os.name != "nt":
+        return 0
+    try:
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        hwnds = _doubao_window_handles()
+        for hwnd in hwnds:
+            user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+        return len(hwnds)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def hide_doubao_offscreen() -> int:
+    """把窗口挪到屏幕外（不最小化）：用户看不见，但 Electron 仍然正常渲染、能收输入。
+
+    最小化会让豆包不处理键盘/鼠标事件（发送按钮点不动），所以这里用「挪出屏」而不是 SW_MINIMIZE。
+    """
+
+    if os.name != "nt":
+        return 0
+    try:
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        hwnds = _doubao_window_handles()
+        SWP_NOSIZE = 0x0001
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        SWP_SHOWWINDOW = 0x0040
+        for hwnd in hwnds:
+            user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE：显示但不抢焦点
+            user32.SetWindowPos(
+                hwnd, 0, -3200, -3200, 0, 0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+        return len(hwnds)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 class CdpConnection:
     """极简 CDP 客户端（aiohttp WebSocket）。"""
 
@@ -275,8 +361,14 @@ class DoubaoClient:
             startupinfo=startupinfo,
         )
         deadline = time.time() + launch_timeout
+        minimized_at = 0.0
         while time.time() < deadline:
+            # 豆包自己会弹出来（Electron 不认 STARTUPINFO），前 25 秒一直按最小化
+            if time.time() - minimized_at > 0.5:
+                hide_doubao_offscreen()
+                minimized_at = time.time()
             if await self._cdp_alive():
+                hide_doubao_offscreen()
                 return
             await asyncio.sleep(0.7)
         raise RuntimeError(
@@ -298,6 +390,7 @@ class DoubaoClient:
         ws = await sess.ws_connect(chat["webSocketDebuggerUrl"], heartbeat=30)
         self.conn = CdpConnection(ws)
         await self.conn.start()
+        hide_doubao_offscreen()
         for method in ("Runtime.enable", "Page.enable"):
             try:
                 await self.conn.send(method, timeout=5)

@@ -39,7 +39,7 @@ from .doubao_cdp import DoubaoClient, find_doubao_exe
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.7.3"
+PLUGIN_VERSION = "0.7.4"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
