@@ -35,11 +35,17 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Image, Plain
 
-from .doubao_cdp import DoubaoClient, find_doubao_exe
+from .doubao_cdp import (
+    DoubaoClient,
+    find_doubao_exe,
+    hide_doubao_offscreen,
+    restore_doubao_windows,
+    doubao_windows_state,
+)
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.7.4"
+PLUGIN_VERSION = "0.7.5"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -95,6 +101,8 @@ class DoubaoPaintPlugin(Star):
         # 所以默认「先回一句在画了，画完再发图」，避免工具被超时掐掉。
         self.async_paint = bool(cfg.get("async_paint", True))
         self.prewarm_doubao = bool(cfg.get("prewarm_doubao", True))
+        # 画完把豆包窗口放回屏幕上（不抢焦点），老大想自己用豆包时它就在那儿
+        self.restore_after_paint = bool(cfg.get("restore_after_paint", True))
         self._paint_tasks: dict[str, asyncio.Task] = {}
         self.restart_when_no_cdp = bool(cfg.get("restart_when_no_cdp", True))
         try:
@@ -1217,6 +1225,13 @@ class DoubaoPaintPlugin(Star):
                 await client.close()
             except Exception:  # noqa: BLE001
                 pass
+            if getattr(self, "restore_after_paint", True):
+                try:
+                    moved = restore_doubao_windows()
+                    if moved:
+                        logger.info("[DoubaoPaint] 豆包窗口已放回屏幕（%s 个）", moved)
+                except Exception:  # noqa: BLE001
+                    pass
 
         files = [str(f) for f in (result.get("files") or []) if Path(str(f)).is_file()]
         if not files:
@@ -1265,7 +1280,29 @@ class DoubaoPaintPlugin(Star):
         return "\n".join(lines)
 
     # ── 自检工具 ────────────────────────────────────────────────────────
+    @filter.llm_tool(name="doubao_window")
+    async def doubao_window(self, event: AstrMessageEvent, action: str = "show") -> str:
+        """把豆包窗口放出来或收起来（她想自己用豆包时说一句就行）。
+
+        Args:
+            action(string): show = 把窗口放回屏幕；hide = 挪到屏幕外（不打扰）。
+        """
+
+        if not self._can_use(event):
+            return self.DENY_TEXT
+
+        act = str(action or "show").strip().lower()
+        try:
+            if act in ("hide", "off", "收起", "藏起来"):
+                n = hide_doubao_offscreen()
+                return f"收起来了（{n} 个窗口）" if n else "没找到豆包窗口（它可能没在跑）"
+            n = restore_doubao_windows()
+            return f"放出来了（{n} 个窗口），没抢焦点" if n else "没找到豆包窗口（它可能没在跑）"
+        except Exception as exc:  # noqa: BLE001
+            return f"操作失败：{exc}"
+
     @filter.llm_tool(name="doubao_paint_status")
+
     async def doubao_paint_status(self, event: AstrMessageEvent) -> str:
         """检查豆包画画能不能用：豆包程序、调试端口、参考图、状态读取。"""
         if not self._can_use(event):

@@ -161,6 +161,73 @@ def minimize_doubao_windows() -> int:
         return 0
 
 
+_ORIGINAL_RECTS: dict[int, tuple[int, int]] = {}
+
+
+def restore_doubao_windows() -> int:
+    """把豆包窗口放回原来屏幕上的位置（不抢焦点）。"""
+
+    if os.name != "nt":
+        return 0
+    try:
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        SWP_NOSIZE = 0x0001
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        SWP_SHOWWINDOW = 0x0040
+        moved = 0
+        for hwnd in _doubao_window_handles():
+            pos = _ORIGINAL_RECTS.get(hwnd, (120, 90))
+            user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+            user32.SetWindowPos(
+                hwnd, 0, int(pos[0]), int(pos[1]), 0, 0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+            moved += 1
+        return moved
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def doubao_windows_state() -> list[tuple[int, int, int]]:
+    """[(hwnd, left, top), ...] 方便自检。"""
+
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        out = []
+        for hwnd in _doubao_window_handles():
+            rect = RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            out.append((hwnd, rect.left, rect.top))
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def hide_doubao_offscreen() -> int:
     """把窗口挪到屏幕外（不最小化）：用户看不见，但 Electron 仍然正常渲染、能收输入。
 
@@ -178,7 +245,21 @@ def hide_doubao_offscreen() -> int:
         SWP_NOZORDER = 0x0004
         SWP_NOACTIVATE = 0x0010
         SWP_SHOWWINDOW = 0x0040
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
         for hwnd in hwnds:
+            if hwnd not in _ORIGINAL_RECTS:
+                rect = RECT()
+                if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                    # 只在窗口还在屏幕里时记位置，别把 -3200 记成"原位"
+                    if rect.left > -3000:
+                        _ORIGINAL_RECTS[hwnd] = (rect.left, rect.top)
             user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE：显示但不抢焦点
             user32.SetWindowPos(
                 hwnd, 0, -3200, -3200, 0, 0,
