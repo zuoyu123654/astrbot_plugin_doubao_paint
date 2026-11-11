@@ -94,6 +94,11 @@
     "description": "后台画图：先回一句「在画了」，画完再把图发过来（豆包要 1~2 分钟，工具调用有 120 秒上限，关掉容易被掐断）。",
     "default": true
   },
+  "prewarm_doubao": {
+    "type": "bool",
+    "description": "AstrBot 启动后就在后台把豆包拉起来（最小化、不抢焦点），第一次画图不用等冷启动。",
+    "default": true
+  },
   "out_dir": {
     "type": "string",
     "description": "生成的图存哪。留空 = 插件数据目录下的 images/。",
@@ -128,11 +133,6 @@
     "type": "string",
     "description": "读哪个插件的 plugin_data（默认 astrbot_plugin_private_companion）。",
     "default": "astrbot_plugin_private_companion"
-  },
-  "state_read_all_files": {
-    "type": "bool",
-    "description": "默认关：只读 companions.json。打开后会扫对方 plugin_data 里所有 json，可能读到敏感数据，别随便开。",
-    "default": false
   },
   "self_ref_cute": {
     "type": "string",

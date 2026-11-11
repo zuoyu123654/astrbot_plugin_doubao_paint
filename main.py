@@ -39,7 +39,7 @@ from .doubao_cdp import DoubaoClient, find_doubao_exe
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.7.1"
+PLUGIN_VERSION = "0.7.3"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -94,6 +94,7 @@ class DoubaoPaintPlugin(Star):
         # 豆包出一张要 1~2 分钟，而 AstrBot 的工具调用有 120 秒上限。
         # 所以默认「先回一句在画了，画完再发图」，避免工具被超时掐掉。
         self.async_paint = bool(cfg.get("async_paint", True))
+        self.prewarm_doubao = bool(cfg.get("prewarm_doubao", True))
         self._paint_tasks: dict[str, asyncio.Task] = {}
         self.restart_when_no_cdp = bool(cfg.get("restart_when_no_cdp", True))
         try:
@@ -156,13 +157,13 @@ class DoubaoPaintPlugin(Star):
 
         self.read_state = bool(cfg.get("read_state", True))
         self.state_plugin = str(cfg.get("state_plugin", "astrbot_plugin_private_companion") or "").strip()
-        self.state_read_all_files = bool(cfg.get("state_read_all_files", False))
 
         # 没有参考图时用来锁形象的文字；留空 = 用内置的「蓝色大肥鱼」描述
         self.self_appearance = str(cfg.get("self_appearance", "") or "").strip()
         # 拿用户的图当参考图之前，先让多模态模型描述一下（没有多模态 provider 就自动跳过）
         self.read_image = bool(cfg.get("read_image", True))
         self.caption_provider = str(cfg.get("caption_provider", "") or "").strip()
+        self._image_desc_cache: dict[str, tuple[float, str]] = {}
         self.ref_cute_cfg = str(cfg.get("self_ref_cute", "") or "").strip()
         self.ref_mature_cfg = str(cfg.get("self_ref_mature", "") or "").strip()
 
@@ -187,6 +188,9 @@ class DoubaoPaintPlugin(Star):
     # ── 生命周期 ────────────────────────────────────────────────────────
     async def initialize(self) -> None:
         self._cleaner = asyncio.create_task(self._cleanup_loop())
+        self._warm_task = None
+        if self.prewarm_doubao and self.backend != "openai":
+            self._warm_task = asyncio.create_task(self._warmup_doubao())
         logger.info(
             "[DoubaoPaint] 已启动：豆包=%s｜输出=%s｜Timeout=%ss｜读状态=%s",
             self.app_exe or "（没找到豆包）",
@@ -196,9 +200,32 @@ class DoubaoPaintPlugin(Star):
         )
         logger.info("[DoubaoPaint] 角色参考图（按文件名挑）：%s", self._ref_list_text())
 
+    async def _warmup_doubao(self) -> None:
+        """后台把豆包拉起来（最小化、不抢焦点），别等用户第一次画图才冷启动。"""
+
+        try:
+            client = DoubaoClient(
+                port=self.cdp_port,
+                app_exe=self._doubao_exe(),
+                timeout=self.timeout_sec,
+                out_dir=self.image_dir,
+                auto_launch=self.auto_launch,
+                restart_when_no_cdp=self.restart_when_no_cdp,
+            )
+            try:
+                await client.ensure_ready()
+                await client.connect()
+                logger.info("[DoubaoPaint] 豆包已预热（后台待命，窗口最小化）")
+            finally:
+                await client.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.info("[DoubaoPaint] 豆包预热失败（第一次画图时会再试）：%s", exc)
+
     async def terminate(self) -> None:
         if self._cleaner and not self._cleaner.done():
             self._cleaner.cancel()
+        if getattr(self, "_warm_task", None) and not self._warm_task.done():
+            self._warm_task.cancel()
 
     # ── 权限 ────────────────────────────────────────────────────────────
     def _owner_ids(self) -> set[str]:
@@ -389,6 +416,58 @@ class DoubaoPaintPlugin(Star):
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[DoubaoPaint] 后台发图失败：%s", exc)
+
+    async def _describe_image(self, path: str) -> str:
+        """让模型看一眼图，返回画面描述（30 分钟缓存；失败返回空，不影响出图）。"""
+
+        try:
+            p = Path(str(path))
+        except Exception:  # noqa: BLE001
+            return ""
+        if not p.is_file():
+            return ""
+
+        cache = getattr(self, "_image_desc_cache", None)
+        if cache is None:
+            cache = self._image_desc_cache = {}
+        try:
+            key = f"{p}|{int(p.stat().st_mtime)}"
+        except OSError:
+            key = str(p)
+        hit = cache.get(key)
+        if hit and time.time() - hit[0] < 1800:
+            return hit[1]
+
+        provider = str(getattr(self, "caption_provider", "") or "").strip()
+        if not provider:
+            try:
+                provider = await self.context.get_current_chat_provider_id(
+                    umo=str(getattr(self, "_last_umo", "") or "")
+                ) or ""
+            except Exception:  # noqa: BLE001
+                provider = ""
+
+        prompt = (
+            "看一眼这张图，用中文描述：主体、动作、风格、构图、色调、氛围。"
+            "150 字以内，只输出描述本身，不要解释、不要 markdown。"
+        )
+        if not provider:
+            logger.info("[DoubaoPaint] 没有可用的识图模型，跳过画面描述")
+            return ""
+        try:
+            resp = await self.context.llm_generate(
+                chat_provider_id=provider,
+                prompt=prompt,
+                image_urls=[str(p)],
+            )
+            text = str(getattr(resp, "completion_text", "") or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.info("[DoubaoPaint] 识图失败（%s），跳过画面描述", exc)
+            return ""
+        if text:
+            cache[key] = (time.time(), text)
+            logger.info("[DoubaoPaint] 参考图描述：%s", text[:60])
+        return text
 
     async def _paint_and_send(self, task: dict[str, Any], image_path: str) -> None:
         """后台把「先发的需求 + 后发的图」画完，再发回同一个会话。"""

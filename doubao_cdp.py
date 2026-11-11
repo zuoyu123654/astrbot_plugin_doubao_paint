@@ -262,10 +262,17 @@ class DoubaoClient:
         if not Path(self.app_exe).is_file():
             raise RuntimeError(f"找不到豆包主程序：{self.app_exe}")
         logger.info("[DoubaoCDP] 启动豆包：%s --remote-debugging-port=%s", self.app_exe, self.port)
+        # 最小化启动：不抢焦点、不弹到最前面（豆包是 Electron，隐藏窗口有时不渲染，所以用最小化）
+        startupinfo = None
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 7  # SW_SHOWMINNOACTIVE
         subprocess.Popen(  # noqa: S603
             [self.app_exe, f"--remote-debugging-port={self.port}"],
             close_fds=True,
             creationflags=0x00000008 if os.name == "nt" else 0,  # DETACHED_PROCESS
+            startupinfo=startupinfo,
         )
         deadline = time.time() + launch_timeout
         while time.time() < deadline:
@@ -297,6 +304,21 @@ class DoubaoClient:
             except Exception:  # noqa: BLE001
                 pass
         return self.conn
+
+    async def restart(self) -> None:
+        """彻底重开豆包（页面状态卡住时用：发送没反应、输入框清不掉）。"""
+
+        logger.info("[DoubaoCDP] 重启豆包（页面状态可能卡住了）")
+        if self.conn is not None:
+            await self.conn.close()
+            self.conn = None
+        _kill_doubao()
+        deadline = time.time() + 25
+        while time.time() < deadline and _is_process_running():
+            await asyncio.sleep(0.5)
+        await asyncio.sleep(1.0)
+        await self.ensure_ready()
+        await self.connect()
 
     # ── 页面操作 ───────────────────────────────────────────────────
     async def wait_composer(self, timeout: float = 9.0) -> bool:
@@ -357,7 +379,15 @@ class DoubaoClient:
                     href = before
                 if href != before:
                     return await self.wait_composer()
-        return await self.wait_composer()
+
+        # 点「新对话」没反应（实测有时会这样）⇒ 直接导航到空白新对话
+        try:
+            logger.info("[DoubaoCDP] 新对话按钮没生效，直接导航到空白会话")
+            await self.conn.send("Page.navigate", {"url": "chrome://doubao-chat/chat"})
+            await asyncio.sleep(3.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DoubaoCDP] 导航新对话失败：%s", exc)
+        return await self.wait_composer(12)
 
     async def type_text(self, text: str) -> None:
         assert self.conn
@@ -377,7 +407,20 @@ class DoubaoClient:
         await self.conn.send("Input.insertText", {"text": text})
         await asyncio.sleep(0.5)
 
-    async def submit(self) -> None:
+    async def composer_text(self) -> str:
+        """输入框里现在的文字（判断有没有真的发出去）。"""
+
+        assert self.conn
+        try:
+            text = await self.conn.evaluate(
+                "(() => { const el = document.querySelector('div.tiptap.ProseMirror, [contenteditable=\"true\"]');"
+                " return el ? (el.innerText || '') : '' })()"
+            )
+            return str(text or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    async def _press_enter(self) -> None:
         assert self.conn
         for evt in ("keyDown", "keyUp"):
             await self.conn.send(
@@ -390,6 +433,66 @@ class DoubaoClient:
                     "nativeVirtualKeyCode": 13,
                 },
             )
+
+    async def _click_send_button(self) -> bool:
+        """点豆包的发送按钮（data-testid=chat_input_send_button），用可信鼠标事件。
+
+        实测：空白新对话页上回车根本发不出去（框架没绑 Enter），必须点这个按钮。
+        """
+
+        assert self.conn
+        try:
+            pos = await self.conn.evaluate(
+                "(() => {"
+                " const b = document.querySelector('button[data-testid=\"chat_input_send_button\"]');"
+                " if (!b || !b.offsetParent) return null;"
+                " const r = b.getBoundingClientRect();"
+                " return { x: r.left + r.width / 2, y: r.top + r.height / 2 } })()"
+            )
+        except Exception:  # noqa: BLE001
+            pos = None
+        if not pos:
+            return False
+        x, y = pos["x"], pos["y"]
+        await self.conn.send(
+            "Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "none"}
+        )
+        await asyncio.sleep(0.05)
+        await self.conn.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1},
+        )
+        await asyncio.sleep(0.05)
+        await self.conn.send(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1},
+        )
+        return True
+
+    async def submit(self, verify: bool = True) -> bool:
+        """发送：优先点发送按钮（空白页上回车无效），不行再回车。返回是否确认发出。"""
+
+        assert self.conn
+        before = await self.composer_text()
+
+        clicked = await self._click_send_button()
+        if clicked:
+            await asyncio.sleep(1.2)
+            if not verify or await self.composer_text() != before:
+                return True
+
+        await self._press_enter()
+        if not verify:
+            return True
+        await asyncio.sleep(1.2)
+        if await self.composer_text() != before:
+            return True
+
+        # 最后再点一次按钮
+        if not clicked and await self._click_send_button():
+            await asyncio.sleep(1.5)
+            return await self.composer_text() != before
+        return False
 
     async def collect_urls(self) -> list[str]:
         assert self.conn
@@ -495,12 +598,12 @@ class DoubaoClient:
         await asyncio.sleep(0.08)
         await self.conn.send(
             "Input.dispatchMouseEvent",
-            {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+            {"type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1},
         )
         await asyncio.sleep(0.06)
         await self.conn.send(
             "Input.dispatchMouseEvent",
-            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
+            {"type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1},
         )
         return True
 
@@ -622,7 +725,29 @@ class DoubaoClient:
         before = [image_key(u) for u in await self.collect_urls()]
 
         await self.type_text(prompt)
-        await self.submit()
+        sent = await self.submit()
+        if not sent:
+            # 实测：页面状态卡住时，回车和点发送都没反应。重启豆包再试一次。
+            logger.warning("[DoubaoCDP] 发送没生效，重启豆包重试一次")
+            try:
+                await self.restart()
+                await self.wait_composer(15)
+                if new_chat:
+                    try:
+                        await self.conn.send("Page.navigate", {"url": "chrome://doubao-chat/chat"})
+                        await asyncio.sleep(3.0)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    await self.wait_composer(12)
+                if ref_images:
+                    await self.attach_images(list(ref_images))
+                await self.wait_images_stable()
+                await self.type_text(prompt)
+                sent = await self.submit()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[DoubaoCDP] 重启重试失败：%s", exc)
+            if not sent:
+                raise RuntimeError("提示词发不出去（豆包输入框没反应），重启后仍失败")
 
         baseline = set(before)
         await asyncio.sleep(1.5)

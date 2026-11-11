@@ -1,4 +1,4 @@
-name: astrbot_plugin_doubao_paint
+﻿name: astrbot_plugin_doubao_paint
 logo: ./logo.png
 display_name: 豆包画画
 short_desc: 在 QQ 里说「画一张…」就出图并直接发回来；图生图、她自己的形象、按当前状态画；生图后端可选本地豆包或任意 OpenAI 兼容 API
@@ -38,7 +38,7 @@ desc: >-
 
   AI 会先问你要「本地豆包」还是「生图模型 API」，再按 SETUP-FOR-AI.md 配好、放参考图、真画一张验证。
 
-version: 0.7.1
+version: 0.7.3
 author: paopao
 repo: https://github.com/zuoyu123654/astrbot_plugin_doubao_paint
 astrbot_version: ">=4.17.0"
