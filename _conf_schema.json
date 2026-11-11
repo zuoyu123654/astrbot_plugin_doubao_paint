@@ -101,8 +101,8 @@
   },
   "restore_after_paint": {
     "type": "bool",
-    "description": "画完把豆包窗口放回屏幕上（不抢焦点），你想自己用豆包时它就在那儿。",
-    "default": true
+    "description": "画完是否把豆包窗口放回屏幕（默认关闭：一直保持最小化；想自己用豆包时让她调 doubao_window show）。",
+    "default": false
   },
   "out_dir": {
     "type": "string",

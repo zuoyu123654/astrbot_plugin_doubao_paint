@@ -145,7 +145,11 @@ def _doubao_window_handles() -> list[int]:
 
 
 def minimize_doubao_windows() -> int:
-    """把豆包的窗口最小化（Electron 不认 STARTUPINFO，得用 ShowWindow 补一刀）。"""
+    """把豆包的窗口最小化。
+
+    ⚠️ 别用它跑生图：最小化后 document.visibilityState 变成 hidden，
+    豆包会暂停处理发送（点了没反应、回车也没用）。要用 hide_doubao_offscreen()。
+    """
 
     if os.name != "nt":
         return 0
@@ -189,7 +193,7 @@ def restore_doubao_windows() -> int:
         moved = 0
         for hwnd in _doubao_window_handles():
             pos = _ORIGINAL_RECTS.get(hwnd, (120, 90))
-            user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE：从最小化恢复
             user32.SetWindowPos(
                 hwnd, 0, int(pos[0]), int(pos[1]), 0, 0,
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
@@ -229,45 +233,9 @@ def doubao_windows_state() -> list[tuple[int, int, int]]:
 
 
 def hide_doubao_offscreen() -> int:
-    """把窗口挪到屏幕外（不最小化）：用户看不见，但 Electron 仍然正常渲染、能收输入。
+    """兼容旧调用：现在统一用最小化（实测最小化不影响 CDP 输入）。"""
 
-    最小化会让豆包不处理键盘/鼠标事件（发送按钮点不动），所以这里用「挪出屏」而不是 SW_MINIMIZE。
-    """
-
-    if os.name != "nt":
-        return 0
-    try:
-        import ctypes
-
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        hwnds = _doubao_window_handles()
-        SWP_NOSIZE = 0x0001
-        SWP_NOZORDER = 0x0004
-        SWP_NOACTIVATE = 0x0010
-        SWP_SHOWWINDOW = 0x0040
-        class RECT(ctypes.Structure):
-            _fields_ = [
-                ("left", ctypes.c_long),
-                ("top", ctypes.c_long),
-                ("right", ctypes.c_long),
-                ("bottom", ctypes.c_long),
-            ]
-
-        for hwnd in hwnds:
-            if hwnd not in _ORIGINAL_RECTS:
-                rect = RECT()
-                if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                    # 只在窗口还在屏幕里时记位置，别把 -3200 记成"原位"
-                    if rect.left > -3000:
-                        _ORIGINAL_RECTS[hwnd] = (rect.left, rect.top)
-            user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE：显示但不抢焦点
-            user32.SetWindowPos(
-                hwnd, 0, -3200, -3200, 0, 0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            )
-        return len(hwnds)
-    except Exception:  # noqa: BLE001
-        return 0
+    return minimize_doubao_windows()
 
 
 class CdpConnection:
@@ -446,10 +414,10 @@ class DoubaoClient:
         while time.time() < deadline:
             # 豆包自己会弹出来（Electron 不认 STARTUPINFO），前 25 秒一直按最小化
             if time.time() - minimized_at > 0.5:
-                hide_doubao_offscreen()
+                minimize_doubao_windows()
                 minimized_at = time.time()
             if await self._cdp_alive():
-                hide_doubao_offscreen()
+                minimize_doubao_windows()
                 return
             await asyncio.sleep(0.7)
         raise RuntimeError(
@@ -471,12 +439,27 @@ class DoubaoClient:
         ws = await sess.ws_connect(chat["webSocketDebuggerUrl"], heartbeat=30)
         self.conn = CdpConnection(ws)
         await self.conn.start()
-        hide_doubao_offscreen()
+        # 页面还在初始化时就最小化，豆包会不处理输入（发送点不动）。
+        # 所以先让它在屏幕外可见地加载完，等输入框就绪再最小化。
+        try:
+            await self.wait_composer(20)
+        except Exception:  # noqa: BLE001
+            pass
+        await asyncio.sleep(0.6)
+        minimize_doubao_windows()
         for method in ("Runtime.enable", "Page.enable"):
             try:
                 await self.conn.send(method, timeout=5)
             except Exception:  # noqa: BLE001
                 pass
+        # 窗口在屏幕外/没焦点时，豆包会当成"没在前台"而不处理发送。
+        # 打开焦点模拟，让页面始终认为自己是 focused，但窗口仍然不打扰用户。
+        try:
+            await self.conn.send(
+                "Emulation.setFocusEmulationEnabled", {"enabled": True}, timeout=5
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return self.conn
 
     async def restart(self) -> None:

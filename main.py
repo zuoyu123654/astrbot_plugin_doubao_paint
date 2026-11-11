@@ -45,7 +45,7 @@ from .doubao_cdp import (
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.7.5"
+PLUGIN_VERSION = "0.7.7"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -102,7 +102,7 @@ class DoubaoPaintPlugin(Star):
         self.async_paint = bool(cfg.get("async_paint", True))
         self.prewarm_doubao = bool(cfg.get("prewarm_doubao", True))
         # 画完把豆包窗口放回屏幕上（不抢焦点），老大想自己用豆包时它就在那儿
-        self.restore_after_paint = bool(cfg.get("restore_after_paint", True))
+        self.restore_after_paint = bool(cfg.get("restore_after_paint", False))
         self._paint_tasks: dict[str, asyncio.Task] = {}
         self.restart_when_no_cdp = bool(cfg.get("restart_when_no_cdp", True))
         try:
@@ -1225,7 +1225,7 @@ class DoubaoPaintPlugin(Star):
                 await client.close()
             except Exception:  # noqa: BLE001
                 pass
-            if getattr(self, "restore_after_paint", True):
+            if getattr(self, "restore_after_paint", False):
                 try:
                     moved = restore_doubao_windows()
                     if moved:
