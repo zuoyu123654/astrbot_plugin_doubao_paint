@@ -45,7 +45,7 @@ from .doubao_cdp import (
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.7.7"
+PLUGIN_VERSION = "0.7.8"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -66,6 +66,9 @@ SELF_PATTERNS = (
 SELF_HINTS = (
     "你自己", "你现在的", "你的样子", "你的模样", "你长什么样", "画个你", "画一只你",
     "自画像", "泡泡", "本鲸鱼娘", "你的状态", "你此刻", "画一张你", "画一个你",
+    # 她自己写画面描述时常用第三人称/自称，这些也要认出来（0.7.8）
+    "鲸鱼娘", "鲸尾", "鲸鳍", "我自己", "画我", "我的样子", "我的尾巴", "本小姐",
+    "大肥鱼", "蓝发", "女仆裙",
 )
 MATURE_HINTS = ("成熟", "长大", "成年", "御姐", "大只", "第二张", "第二个形象")
 
@@ -336,21 +339,30 @@ class DoubaoPaintPlugin(Star):
         return False
 
     def _pick_ref(self, keyword: str, prompt: str) -> str:
-        """按文件名挑参考图：先看显式指定的词，再看用户话里提到的名字，最后用「默认」。
+        """按文件名挑参考图：先看显式指定的词，再看话里提到的名字，最后用「默认」。
 
-        文件名里的括号说明也算名字的一部分（例如「默认（Q版可爱 女仆装）」）。
+        文件名里的括号说明也算名字的一部分（例如「默认（Q版可爱 女仆装）」），
+        所以只写「默认」「女仆装」也认得出来（0.7.8 起）。
         """
 
         files = self._ref_files()
         if not files:
             return ""
+        prompt = str(prompt or "")
         kw = str(keyword or "").strip()
         if kw:
             for p in files:
                 if kw in p.stem or kw.lower() in p.stem.lower():
                     return str(p)
+        # 话里说了「成熟/长大/御姐」⇒ 优先挑成熟版，不管文件名后面括号写了什么
+        if any(h in prompt for h in ("成熟", "长大", "御姐", "成年")):
+            for p in files:
+                if "成熟" in p.stem or "长大" in p.stem:
+                    return str(p)
         for p in files:
-            if p.stem and p.stem in (prompt or ""):
+            stem = p.stem
+            base = re.split(r"[（(]", stem)[0].strip()
+            if (stem and stem in prompt) or (base and base in prompt):
                 return str(p)
         return self._ref_default()
 
@@ -966,6 +978,8 @@ class DoubaoPaintPlugin(Star):
                 可以把这理解成**你在画画**：你描述的这段画面，最后会真的画出来给用户看。
             self_portrait(bool): 是不是画「她自己」。true 时用内置角色设定图当参考图，保持形象一致。
                 用户说「画一个你看书的样子」「想看你看书」「画你的样子」这类，都算画她自己 → true。
+                不用太担心漏设：插件也会看你写的画面描述，里面有她（鲸鱼娘/你自己/我的样子/我的尾巴…）
+                就自动带上参考图；要「成熟的她」把 mature 设 true。
             with_state(bool): 是否把此刻的状态/天气写进提示词（配 self_portrait 用得最多）
             proactive(bool): 这次是「你自己想画」的（不是用户要求的）→ true；用户要求的留 false
             reference(string): 用哪张参考图，填文件名里的关键词（例如「成熟」「女仆装」「默认」；
@@ -998,7 +1012,21 @@ class DoubaoPaintPlugin(Star):
             self._last_self_draw = time.time()
 
         user_text = str(getattr(event, "message_str", "") or "")
-        use_self = bool(self_portrait) or self._looks_like_self(user_text or body)
+        # 画的是不是她自己：显式 self_portrait / 要「成熟版」/ 用户的话里提到她 /
+        # **她自己写的画面描述里提到她**（0.7.8 起两边都看，别再只看用户那句话）
+        use_self = (
+            bool(self_portrait)
+            or bool(mature)
+            or self._looks_like_self(user_text)
+            or self._looks_like_self(body)
+        )
+        if use_self:
+            logger.info(
+                "[DoubaoPaint] 这张画里是她自己 ⇒ 带上角色参考图（%s）",
+                "self_portrait"
+                if self_portrait
+                else ("成熟版" if mature else "描述里提到她自己"),
+            )
         img_now = self._image_in_event(event)
         if img_now:
             # 这条消息里就带图：优先用它当参考图
@@ -1013,6 +1041,9 @@ class DoubaoPaintPlugin(Star):
             if ref:
                 refs.insert(0, ref)
                 body += "\n\n" + self._self_appearance_text(bool(ref))
+                logger.info("[DoubaoPaint] 参考图：%s", Path(ref).name)
+            else:
+                logger.info("[DoubaoPaint] refs 里没有图，用文字锁形象")
         refs = [r for r in dict.fromkeys(refs) if Path(r).is_file()]
 
         # 用用户的图当参考图时，先读一下图里是什么（她才知道自己照着什么画）

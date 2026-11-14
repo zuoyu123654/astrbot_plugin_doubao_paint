@@ -1,4 +1,4 @@
-﻿name: astrbot_plugin_doubao_paint
+name: astrbot_plugin_doubao_paint
 logo: ./logo.png
 display_name: 豆包画画
 short_desc: 在 QQ 里说「画一张…」就出图并直接发回来；图生图、她自己的形象、按当前状态画；生图后端可选本地豆包或任意 OpenAI 兼容 API
@@ -18,6 +18,8 @@ desc: >-
   3. **她自己的形象**：`refs/` 里按**文件名**挑参考图（括号里的字也算，例如「默认（Q版可爱 女仆装）」
      「成熟（长大）」），不限张数；挑不到用名字带「默认」的那张。
      一张都没有也能画：退化成文字描述（默认「蓝色大肥鱼」那套，可用 `self_appearance` 改成自己的角色）。
+     0.7.8 起**她自己判断**：只要画面描述里提到她（鲸鱼娘/你自己/我的样子/我的尾巴/本小姐…）
+     或要「成熟版」，就自动带上角色参考图，不用非得让模型记得传 `self_portrait`。
   4. **按状态画**：只在「画你自己 / 你现在的状态」时启用——把当前时间（白天/夜晚）、
      真实天气（只取天气/温度/湿度，**不含地区**）、情绪/精力/身体放到提示词最前面，
      并要求画面光线和天气对得上。
@@ -38,7 +40,7 @@ desc: >-
 
   AI 会先问你要「本地豆包」还是「生图模型 API」，再按 SETUP-FOR-AI.md 配好、放参考图、真画一张验证。
 
-version: 0.7.7
+version: 0.7.8
 author: paopao
 repo: https://github.com/zuoyu123654/astrbot_plugin_doubao_paint
 astrbot_version: ">=4.17.0"
