@@ -45,7 +45,7 @@ from .doubao_cdp import (
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.7.8"
+PLUGIN_VERSION = "0.7.9"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -1021,8 +1021,9 @@ class DoubaoPaintPlugin(Star):
             or self._looks_like_self(body)
         )
         if use_self:
+            # 注意：日志里别用 ⇒ 这类 GBK 打不出来的符号，AstrBot 的日志会整行丢掉
             logger.info(
-                "[DoubaoPaint] 这张画里是她自己 ⇒ 带上角色参考图（%s）",
+                "[DoubaoPaint] 这张画里是她自己，带上角色参考图（%s）",
                 "self_portrait"
                 if self_portrait
                 else ("成熟版" if mature else "描述里提到她自己"),
