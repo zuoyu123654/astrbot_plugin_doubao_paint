@@ -9,6 +9,11 @@
     "description": "生图后端：doubao（本机豆包，默认）/ openai（任意 OpenAI 兼容的 /images/generations 接口）。",
     "default": "doubao"
   },
+  "draw_prefix": {
+    "type": "string",
+    "description": "送豆包时固定顶在提示词最前面的那句画图指令（默认「画一幅画：」）。豆包只认开头，开头不是画图指令它就把描述当聊天回；留空 = 用默认值。",
+    "default": ""
+  },
   "access_mode": {
     "type": "string",
     "description": "谁能用：owner（只有主人=cmd_config.json 的 admins_id，默认）/ whitelist（主人+allowed_users）/ everyone（所有人）。",
