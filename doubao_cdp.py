@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import time
@@ -33,6 +34,10 @@ UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 )
+
+# 豆包看的是**开头那句**：开头没有画图指令，它就把整段描述当聊天回你。
+# 所以送进去的提示词一律在最前面顶一句这个（提示词中间随便哪个「画」字它不认）。
+DRAW_INTENT_PREFIX = "画一幅画："
 
 
 def find_doubao_exe() -> str:
@@ -332,6 +337,7 @@ class DoubaoClient:
         out_dir: Path,
         auto_launch: bool = True,
         restart_when_no_cdp: bool = True,
+        draw_prefix: str = DRAW_INTENT_PREFIX,
     ) -> None:
         self.port = int(port)
         self.app_exe = app_exe or find_doubao_exe()
@@ -339,6 +345,7 @@ class DoubaoClient:
         self.out_dir = Path(out_dir)
         self.auto_launch = auto_launch
         self.restart_when_no_cdp = restart_when_no_cdp
+        self.draw_prefix = str(draw_prefix or "").strip() or DRAW_INTENT_PREFIX
         self._http: aiohttp.ClientSession | None = None
         self.conn: CdpConnection | None = None
 
@@ -862,7 +869,8 @@ class DoubaoClient:
         prompt = str(prompt or "").strip()
         if not prompt:
             raise RuntimeError("提示词为空")
-        prompt = self._ensure_draw_intent(prompt)
+        prompt = self._ensure_draw_intent(prompt, self.draw_prefix)
+        logger.info("[DoubaoCDP] 送豆包：%s", prompt[:60].replace("\n", " "))
         timeout = float(timeout or self.timeout)
 
         if self.conn is None:
@@ -980,21 +988,20 @@ class DoubaoClient:
         }
 
     @staticmethod
-    def _ensure_draw_intent(prompt: str) -> str:
-        """豆包是「看意图」决定生图的：光写「一只猫趴在窗台」它会当成聊天。
+    def _ensure_draw_intent(prompt: str, prefix: str = DRAW_INTENT_PREFIX) -> str:
+        """豆包是「看开头」决定生图的：光写「一只猫趴在窗台」它就当成聊天。
 
-        提示词里没有明确的「画 / 生成 / 插画」这类字眼时，补一个前缀把它掰到生图技能上。
-        实测加了前缀就会一次出 4 张 1728×2304 的原图。
+        所以每次都固定在最前面顶一句「画一幅画：」，不看中间有没有画图词、
+        也不看开头是不是已经有「画一张」——豆包完全理解，多这一句不碍事。
+        唯一例外：原文已经就是这句前缀开头（避免叠成两句）。
         """
-
         text = str(prompt or "").strip()
-        marks = (
-            "画", "绘制", "插画", "生成图", "生成一张", "生成图片", "出一张", "来一张",
-            "图片", "图像", "海报", "壁纸", "封面",
-        )
-        if any(m in text for m in marks):
+        if not text:
             return text
-        return "画一张图：" + text
+        prefix = str(prefix or "").strip() or DRAW_INTENT_PREFIX
+        if text.lstrip(" \u3000\n").startswith(prefix):
+            return text
+        return prefix + text
 
     @staticmethod
     async def _too_small(path: str) -> bool:
