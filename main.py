@@ -36,6 +36,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Image, Plain
 
 from .doubao_cdp import (
+    DRAW_INTENT_PREFIX,
     DoubaoClient,
     find_doubao_exe,
     hide_doubao_offscreen,
@@ -45,7 +46,10 @@ from .doubao_cdp import (
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.7.9"
+PLUGIN_VERSION = "0.7.11"
+
+# 画失败时对用户只说这一句（原因只进日志，别再往聊天里倒堆栈/页面文案）
+FAIL_TEXT = "画失败了，要不要重试？"
 
 # 判断「她在说她自己」的关键词：命中就用角色设定图 + 状态
 # 这些词说明「要用一张图当参考」，但消息里没图 ⇒ 先记着，等图
@@ -130,6 +134,12 @@ class DoubaoPaintPlugin(Star):
         except (TypeError, ValueError):
             self.pending_minutes = 5
         self.auto_paint_next_image = bool(cfg.get("auto_paint_on_next_image", True))
+
+        # 送豆包时开头那句画图指令：豆包只认开头，开头不是画图它就当聊天回。
+        # 配置里能改（别改空着不填，空着就用默认的「画一幅画：」）。
+        self.draw_prefix = (
+            str(cfg.get("draw_prefix", "") or "").strip() or DRAW_INTENT_PREFIX
+        )
 
         # 生图后端：doubao（本机豆包）或 openai（任意 OpenAI 兼容的 /images/generations）
         self.backend = str(cfg.get("image_backend", "doubao") or "doubao").strip().lower()
@@ -422,8 +432,7 @@ class DoubaoPaintPlugin(Star):
             logger.warning("[DoubaoPaint] 后台画图失败（%.1fs）：%s", elapsed, err)
             try:
                 await self.context.send_message(
-                    umo,
-                    MessageChain([Plain(f"画失败了：{str(err or '没拿到图片')[:120]}")]),
+                    umo, MessageChain([Plain(FAIL_TEXT)])
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -524,7 +533,7 @@ class DoubaoPaintPlugin(Star):
             logger.warning("[DoubaoPaint] 补图后生成失败：%s", err)
             try:
                 await self.context.send_message(
-                    umo, MessageChain([Plain(f"图收到了，但画失败了：{err}")])
+                    umo, MessageChain([Plain(FAIL_TEXT)])
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -985,13 +994,17 @@ class DoubaoPaintPlugin(Star):
             reference(string): 用哪张参考图，填文件名里的关键词（例如「成熟」「女仆装」「默认」；
                 括号里的说明也算，比如「默认（Q版可爱 女仆装）」可以填「女仆装」）。
                 留空 = 自动挑：先看话里有没有提到文件名，没有就用「默认」那张。
+
+        失败时：工具会返回「画失败了，要不要重试？」——你就原样把这句话回给用户，
+        不要解释原因、不要贴报错、不要自己编补救办法。
         """
 
         # 只有走本地豆包才需要豆包程序；API 后端不需要
         if self.backend != "openai":
             ok, detail = self._doubao_ready()
             if not ok:
-                return "画不了：" + detail
+                logger.warning("[DoubaoPaint] 豆包不可用：%s", detail)
+                return FAIL_TEXT
 
         body = (prompt or "").strip()
         if not body:
@@ -1105,17 +1118,18 @@ class DoubaoPaintPlugin(Star):
             ok, err, files = await self._generate(body, refs)
         if not ok or not files:
             logger.warning("[DoubaoPaint] 生成失败：%s", err)
-            return f"画失败了：{err or '没有拿到图片'}"
+            return FAIL_TEXT
 
         out = files[0]
         if not Path(out).is_file():
-            return "画完了但没找到文件，看看豆包是不是把图存在别处了"
+            logger.warning("[DoubaoPaint] 出图了但文件不在：%s", out)
+            return FAIL_TEXT
 
         try:
             await event.send(MessageChain([Image.fromFileSystem(out)]))
         except Exception as exc:  # noqa: BLE001
             logger.warning("[DoubaoPaint] 发图失败：%s", exc)
-            return f"画好了，但发图失败：{exc}"
+            return FAIL_TEXT
 
         # 图不在本条消息里（先发图、后说需求）⇒ 把看图结果交给她，她可以顺口转述；
         # 图和需求同一条 / 先需求后补图：只回「画好了」，不再额外回复图的内容
@@ -1241,6 +1255,7 @@ class DoubaoPaintPlugin(Star):
             out_dir=self.image_dir,
             auto_launch=self.auto_launch,
             restart_when_no_cdp=self.restart_when_no_cdp,
+            draw_prefix=self.draw_prefix,
         )
         try:
             result = await client.generate(
