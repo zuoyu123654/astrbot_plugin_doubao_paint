@@ -501,8 +501,91 @@ class DoubaoClient:
             await asyncio.sleep(0.3)
         return False
 
+    async def _trusted_click(self, selector: str, *, last: bool = False) -> bool:
+        """用 CDP 的真实鼠标事件点一个元素（合成 click 在豆包里有时没反应）。"""
+
+        assert self.conn
+        try:
+            pos = await self.conn.evaluate(
+                "(() => { const sel = " + json.dumps(selector) + ";"
+                " const els = [...document.querySelectorAll(sel)].filter((el) => {"
+                "   const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 });"
+                " if (!els.length) return null;"
+                " const el = " + ("els[els.length - 1]" if last else "els[0]") + ";"
+                " const r = el.getBoundingClientRect();"
+                " return { x: r.left + r.width / 2, y: r.top + r.height / 2 } })()"
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        if not pos:
+            return False
+        x, y = pos["x"], pos["y"]
+        for method, params in (
+            ("mouseMoved", {"type": "mouseMoved", "x": x, "y": y, "button": "none"}),
+            (
+                "mousePressed",
+                {
+                    "type": "mousePressed",
+                    "x": x,
+                    "y": y,
+                    "button": "left",
+                    "buttons": 1,
+                    "clickCount": 1,
+                },
+            ),
+            (
+                "mouseReleased",
+                {
+                    "type": "mouseReleased",
+                    "x": x,
+                    "y": y,
+                    "button": "left",
+                    "buttons": 0,
+                    "clickCount": 1,
+                },
+            ),
+        ):
+            try:
+                await self.conn.send("Input.dispatchMouseEvent", params)
+            except Exception:  # noqa: BLE001
+                return False
+            await asyncio.sleep(0.05)
+        return True
+
+    async def _is_empty_chat(self) -> bool:
+        """页面是不是停在一个空白新对话上（2026-11 版豆包改版后的判断方式）。
+
+        新版点「新对话」是 SPA 内部切换，URL 一直不变，所以不能再用 location.href
+        判断；改成看有没有空白引导页 + 输入框是空的。
+        """
+
+        assert self.conn
+        try:
+            return bool(
+                await self.conn.evaluate(
+                    "(() => {"
+                    " if (!document.querySelector('[data-testid=\"flow_chat_guidance_page\"]'))"
+                    "   return false;"
+                    " const el = document.querySelector("
+                    "   'div.tiptap.ProseMirror, [contenteditable=\"true\"]');"
+                    " return !!(el && (el.innerText || '').trim() === '') })()"
+                )
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _wait_empty_chat(self, timeout: float = 8.0) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if await self._is_empty_chat():
+                return True
+            await asyncio.sleep(0.4)
+        return False
+
     async def new_chat(self) -> bool:
         assert self.conn
+        if await self._is_empty_chat():
+            return await self.wait_composer(6)
         try:
             before = await self.conn.evaluate("location.href")
         except Exception:  # noqa: BLE001
@@ -535,8 +618,12 @@ class DoubaoClient:
                         )
                     except Exception:  # noqa: BLE001
                         pass
-            for _ in range(25):
+            # 2026-11 版豆包点「新对话」后 URL 不变（SPA），所以同时看页面是不是
+            # 已经切到空白引导页；只认 href 会白等 20 秒再整页重载。
+            for _ in range(20):
                 await asyncio.sleep(0.4)
+                if await self._is_empty_chat():
+                    return await self.wait_composer(10)
                 try:
                     href = await self.conn.evaluate("location.href")
                 except Exception:  # noqa: BLE001
@@ -544,14 +631,33 @@ class DoubaoClient:
                 if href != before:
                     return await self.wait_composer()
 
-        # 点「新对话」没反应（实测有时会这样）⇒ 直接导航到空白新对话
-        try:
-            logger.info("[DoubaoCDP] 新对话按钮没生效，直接导航到空白会话")
-            await self.conn.send("Page.navigate", {"url": "chrome://doubao-chat/chat"})
-            await asyncio.sleep(3.0)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[DoubaoCDP] 导航新对话失败：%s", exc)
-        return await self.wait_composer(12)
+        # 兜底 1：新版「新对话」按钮有稳定的 testid，用可信鼠标事件点
+        if await self._trusted_click('[data-testid="create_conversation_button"]'):
+            if await self._wait_empty_chat(8):
+                return await self.wait_composer(10)
+
+        # 兜底 2：新版「新对话」快捷键 Ctrl+Shift+K
+        for evt in ("keyDown", "keyUp"):
+            try:
+                await self.conn.send(
+                    "Input.dispatchKeyEvent",
+                    {
+                        "type": evt,
+                        "key": "K",
+                        "code": "KeyK",
+                        "windowsVirtualKeyCode": 75,
+                        "modifiers": 10,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        if await self._wait_empty_chat(8):
+            return await self.wait_composer(10)
+
+        # 都切不过去就不再整页导航了：导航会让页面整个重挂，反而更容易在
+        # 「页面还没挂好」时找不到上传入口（11-19 那次就是这么失败的）。
+        logger.warning("[DoubaoCDP] 新对话没切成，继续在当前对话里画")
+        return False
 
     async def type_text(self, text: str) -> None:
         assert self.conn
@@ -819,25 +925,82 @@ class DoubaoClient:
                 await self.close_preview()
         return have
 
-    async def attach_images(self, paths: list[str]) -> None:
+    async def attach_images(self, paths: list[str], timeout: float = 25.0) -> None:
+        """挂参考图（图生图）。
+
+        上传入口一直是 <input type=file>，但刚切对话、刚重载页面时它会晚几秒才挂上，
+        老代码只查一次就报「页面结构变了」——11-19 豆包更新后就是这么翻车的。
+        现在轮询等它出现，并且取 accept 里带 png 的那个（新版有两个 input）。
+        """
+
         assert self.conn
         files = [str(p) for p in paths if Path(p).is_file()]
         if not files:
             return
-        doc = await self.conn.send("DOM.getDocument", {"depth": -1}, timeout=20)
-        root = (doc.get("root") or {}).get("nodeId")
-        nodes = await self.conn.send(
-            "DOM.querySelectorAll",
-            {"nodeId": root, "selector": 'input[type="file"]'},
-            timeout=20,
-        )
-        node_ids = nodes.get("nodeIds") or []
-        if not node_ids:
-            raise RuntimeError("没找到豆包的文件上传入口（页面结构可能变了）")
-        await self.conn.send(
-            "DOM.setFileInputFiles", {"nodeId": node_ids[0], "files": files}, timeout=30
-        )
-        await asyncio.sleep(2.5)
+
+        deadline = time.time() + timeout
+        node_id: int | None = None
+        last_error = ""
+        while time.time() < deadline:
+            try:
+                doc = await self.conn.send("DOM.getDocument", {"depth": -1}, timeout=20)
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)
+                await asyncio.sleep(0.5)
+                continue
+            root = (doc.get("root") or {}).get("nodeId")
+            if root:
+                for selector in ('input[type="file"][accept*="png"]', 'input[type="file"]'):
+                    try:
+                        nodes = await self.conn.send(
+                            "DOM.querySelectorAll",
+                            {"nodeId": root, "selector": selector},
+                            timeout=20,
+                        )
+                        ids = nodes.get("nodeIds") or []
+                    except Exception as exc:  # noqa: BLE001
+                        last_error = str(exc)
+                        ids = []
+                    if ids:
+                        node_id = ids[0]
+                        break
+            if node_id is not None:
+                break
+            await asyncio.sleep(0.5)
+
+        if node_id is None:
+            raise RuntimeError(
+                "没找到豆包的文件上传入口（等了 %.0fs 还没出现）%s"
+                % (timeout, f"：{last_error}" if last_error else "")
+            )
+
+        try:
+            await self.conn.send(
+                "DOM.setFileInputFiles", {"nodeId": node_id, "files": files}, timeout=30
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"参考图挂不上：{exc}") from exc
+        await asyncio.sleep(2.0)
+
+        shown = await self._attachment_visible()
+        if shown:
+            logger.info("[DoubaoCDP] 参考图已挂上（%s 张）", len(files))
+        else:
+            logger.debug("[DoubaoCDP] 参考图已塞进 input，界面上没数到缩略图（继续）")
+
+    async def _attachment_visible(self) -> bool:
+        """输入框附近出现图片/附件缩略图没有（只用来打日志，不作为失败条件）。"""
+
+        assert self.conn
+        try:
+            n = await self.conn.evaluate(
+                "(() => { const box = document.querySelector('[data-testid=\"chat_input\"]');"
+                " if (!box) return 0;"
+                " return box.querySelectorAll('img, [class*=image], [class*=file]').length })()"
+            )
+            return int(n or 0) > 0
+        except Exception:  # noqa: BLE001
+            return False
 
     # ── 下载 ───────────────────────────────────────────────────────
     async def download(self, url: str, target: Path) -> Path:
@@ -899,11 +1062,9 @@ class DoubaoClient:
                 await self.wait_composer(15)
                 if new_chat:
                     try:
-                        await self.conn.send("Page.navigate", {"url": "chrome://doubao-chat/chat"})
-                        await asyncio.sleep(3.0)
+                        await self.new_chat()
                     except Exception:  # noqa: BLE001
                         pass
-                    await self.wait_composer(12)
                 if ref_images:
                     await self.attach_images(list(ref_images))
                 await self.wait_images_stable()

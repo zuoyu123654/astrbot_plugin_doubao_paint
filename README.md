@@ -142,6 +142,21 @@
   现在改成点 `button[data-testid="chat_input_send_button"]`（可信鼠标事件）；
   如果点了还没反应（页面状态卡住），会**自动重启豆包再发一次**。
 
+## 豆包 11-19 改版修了什么（0.7.12）
+
+豆包桌面端 11-18 自动更新后，页面上有两处变了，画图会直接失败
+（`没找到豆包的文件上传入口（页面结构可能变了）`）：
+
+- **「新对话」不再换 URL**：新版是 SPA 内部切换，`location.href` 一直是
+  `doubao://doubao-chat/chat`。老代码点完只看 href，等了 20 秒没变 ⇒ 以为没生效，
+  就整页 `Page.navigate` 重载；重载还没挂完就去挂参考图，于是找不到上传入口。
+  现在改成看页面有没有切到空白引导页（`[data-testid="flow_chat_guidance_page"]`），
+  必要时再点 `[data-testid="create_conversation_button"]` 或按 `Ctrl+Shift+K`，
+  **不再整页重载**。
+- **上传入口会晚几秒挂上**：`input[type=file]` 还在（新版有两个，带 png 的那个是
+  `data-testid="upload-file-input"`），但切换对话/重载后要等一会儿才出现。
+  `attach_images` 现在轮询等它出现（默认 25 秒），不再查一次就报错。
+
 ## 为什么要「先回一句在画了」
 
 豆包出一张图要 1~2 分钟，而 AstrBot 的工具调用有 **120 秒上限**——同步等一定会被掐断（日志里是 `tool doubao_paint execution timeout after 120 seconds`）。
