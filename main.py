@@ -46,7 +46,7 @@ from .doubao_cdp import (
 from astrbot.api.star import Context, Star, StarTools, register
 
 PLUGIN_NAME = "astrbot_plugin_doubao_paint"
-PLUGIN_VERSION = "0.7.11"
+PLUGIN_VERSION = "0.7.13"
 
 # 画失败时对用户只说这一句（原因只进日志，别再往聊天里倒堆栈/页面文案）
 FAIL_TEXT = "画失败了，要不要重试？"
@@ -204,11 +204,15 @@ class DoubaoPaintPlugin(Star):
         self._recent_images: dict[str, list[tuple[str, float]]] = {}
         # session → 等着配图的「先发的需求」
         self._pending: dict[str, dict[str, Any]] = {}
+        # session → 上一张画的真实结果（异步画图是插件自己发图，模型看不见，
+        # 不记下来她回头就会瞎猜成「没画成」——11-19 晚上就是这么翻车的）
+        self._last_paint: dict[str, dict[str, Any]] = {}
         self._cleaner: asyncio.Task | None = None
 
     # ── 生命周期 ────────────────────────────────────────────────────────
     async def initialize(self) -> None:
         self._cleaner = asyncio.create_task(self._cleanup_loop())
+        self._load_last_paint()
         self._warm_task = None
         if self.prewarm_doubao and self.backend != "openai":
             self._warm_task = asyncio.create_task(self._warmup_doubao())
@@ -430,21 +434,155 @@ class DoubaoPaintPlugin(Star):
 
         if not ok or not files:
             logger.warning("[DoubaoPaint] 后台画图失败（%.1fs）：%s", elapsed, err)
+            self._record_paint(umo, ok=False, reason=err or "没有出图", elapsed=elapsed)
             try:
                 await self.context.send_message(
                     umo, MessageChain([Plain(FAIL_TEXT)])
                 )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[DoubaoPaint] 失败提示也发不出去：%s", exc)
             return
 
         logger.info("[DoubaoPaint] 后台画图完成（%.1fs）：%s", elapsed, Path(files[0]).name)
+        sent, send_err = True, ""
         try:
             await self.context.send_message(
                 umo, MessageChain([Image.fromFileSystem(files[0])])
             )
         except Exception as exc:  # noqa: BLE001
+            sent, send_err = False, str(exc)
             logger.warning("[DoubaoPaint] 后台发图失败：%s", exc)
+        self._record_paint(
+            umo,
+            ok=True,
+            sent=sent,
+            reason=("" if sent else "图画好了但没发出去：" + send_err),
+            elapsed=elapsed,
+            files=files,
+        )
+
+    def _record_paint(
+        self,
+        umo: str,
+        *,
+        ok: bool,
+        reason: str = "",
+        elapsed: float = 0.0,
+        files: list[str] | None = None,
+        sent: bool = True,
+    ) -> None:
+        """记下「上一张画怎么样了」，下一轮请求时告诉她。"""
+
+        item = {
+            "time": time.strftime("%H:%M"),
+            "ok": bool(ok),
+            "sent": bool(sent),
+            "reason": str(reason or "")[:200],
+            "file": Path(files[0]).name if files else "",
+            "elapsed": round(float(elapsed), 1),
+            "ts": time.time(),
+        }
+        self._last_paint[str(umo or "")] = item
+        logger.info(
+            "[DoubaoPaint] 画图结果已记下：ok=%s sent=%s file=%s（%.1fs）",
+            item["ok"],
+            item["sent"],
+            item["file"] or "-",
+            item["elapsed"],
+        )
+        self._save_last_paint()
+
+    def _last_paint_file(self) -> Path:
+        return self.data_dir / "last_paint.json"
+
+    def _save_last_paint(self) -> None:
+        """落盘：插件重载（改完代码重新加载）后她还记得上一张画的结果。"""
+
+        try:
+            cutoff = time.time() - 24 * 3600
+            keep = {
+                k: v
+                for k, v in self._last_paint.items()
+                if isinstance(v, dict) and float(v.get("ts") or 0) >= cutoff
+            }
+            self._last_paint = keep
+            self._last_paint_file().write_text(
+                json.dumps(keep, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[DoubaoPaint] 保存画图结果失败：%s", exc)
+
+    def _load_last_paint(self) -> None:
+        try:
+            raw = self._last_paint_file().read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except FileNotFoundError:
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[DoubaoPaint] 读取画图结果失败：%s", exc)
+            return
+        if not isinstance(data, dict):
+            return
+        cutoff = time.time() - 24 * 3600
+        for k, v in data.items():
+            if isinstance(v, dict) and float(v.get("ts") or 0) >= cutoff:
+                self._last_paint[str(k)] = v
+        if self._last_paint:
+            logger.info(
+                "[DoubaoPaint] 已读取上次画图结果：%s 条（%s）",
+                len(self._last_paint),
+                "、".join(
+                    f"{v.get('time')} {'成功' if v.get('ok') else '失败'}"
+                    for v in self._last_paint.values()
+                ),
+            )
+
+    @filter.on_llm_request()
+    async def _tell_llm_last_paint(self, event: AstrMessageEvent, req: Any) -> None:
+        """把上一张画的真实结果塞进 system prompt。
+
+        异步画图时图是插件自己在后台发的，模型根本看不见结果；不告诉她，
+        老大一问「画好了吗」她只能猜（猜成「没画成」）。这里把事实塞进去。
+        """
+
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        item = self._last_paint.get(umo)
+        if not item:
+            return
+        age = time.time() - float(item.get("ts") or 0)
+        if age > 6 * 3600:
+            self._last_paint.pop(umo, None)
+            return
+
+        if item.get("ok") and item.get("sent"):
+            line = (
+                f"【上一张画·事实】{item.get('time')} 那张图已经画好了，并且已经被插件"
+                f"直接发到这个会话里了（{item.get('file') or '图片'}，用时约 "
+                f"{item.get('elapsed')} 秒）。老大问「画好了吗 / 图呢」，就说画好了、"
+                "已经发过去了；**不要说自己没画成、也不要说还在画**。"
+                "老大要新的图，再调 doubao_paint 画一张。"
+            )
+        elif item.get("ok"):
+            line = (
+                f"【上一张画·事实】{item.get('time')} 那张图画出来了，但没发出去"
+                f"（{item.get('reason') or '发送失败'}）。照实说，可以再发一次或重画。"
+            )
+        else:
+            line = (
+                f"【上一张画·事实】{item.get('time')} 那次画图失败了："
+                f"{item.get('reason') or '没有出图'}。照实说，并告诉老大可以再画一次。"
+            )
+        try:
+            req.system_prompt = (req.system_prompt or "") + "\n\n" + line
+            if not item.get("_told"):
+                item["_told"] = True
+                logger.info(
+                    "[DoubaoPaint] 已把上一张画的结果告诉模型（%s）：%s",
+                    item.get("time"),
+                    "成功已发出" if (item.get("ok") and item.get("sent")) else ("没发出去" if item.get("ok") else "失败"),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[DoubaoPaint] 注入画图结果失败：%s", exc)
 
     async def _describe_image(self, path: str) -> str:
         """让模型看一眼图，返回画面描述（30 分钟缓存；失败返回空，不影响出图）。"""
@@ -527,10 +665,13 @@ class DoubaoPaintPlugin(Star):
             body = prompt
         if self_ref:
             body += "\n\n" + self._self_appearance_text(True)
+        started = time.time()
         async with self._lock:
             ok, err, files = await self._generate(body, refs)
+        elapsed = time.time() - started
         if not ok or not files:
             logger.warning("[DoubaoPaint] 补图后生成失败：%s", err)
+            self._record_paint(umo, ok=False, reason=err or "没有出图", elapsed=elapsed)
             try:
                 await self.context.send_message(
                     umo, MessageChain([Plain(FAIL_TEXT)])
@@ -538,12 +679,22 @@ class DoubaoPaintPlugin(Star):
             except Exception:  # noqa: BLE001
                 pass
             return
+        sent, send_err = True, ""
         try:
             await self.context.send_message(
                 umo, MessageChain([Image.fromFileSystem(files[0])])
             )
         except Exception as exc:  # noqa: BLE001
+            sent, send_err = False, str(exc)
             logger.warning("[DoubaoPaint] 补图后发图失败：%s", exc)
+        self._record_paint(
+            umo,
+            ok=True,
+            sent=sent,
+            reason=("" if sent else "图画好了但没发出去：" + send_err),
+            elapsed=elapsed,
+            files=files,
+        )
 
     def _recent_image(self, event: AstrMessageEvent) -> str:
         key = str(event.unified_msg_origin or "")
@@ -1374,6 +1525,23 @@ class DoubaoPaintPlugin(Star):
         lines.append("角色图（按文件名挑）：" + self._ref_list_text())
         state = self._state_block()
         lines.append("状态读取：" + (state[:120] if state else "（没读到，或 read_state 关了）"))
+        last = self._last_paint.get(str(event.unified_msg_origin or ""))
+        if last:
+            if last.get("ok") and last.get("sent"):
+                lines.append(
+                    f"上一张画：{last.get('time')} ✅ 画好了，已经发到本会话"
+                    f"（{last.get('file') or '图片'}）"
+                )
+            elif last.get("ok"):
+                lines.append(
+                    f"上一张画：{last.get('time')} ⚠️ 画好了但没发出去"
+                    f"（{last.get('reason') or '发送失败'}）"
+                )
+            else:
+                lines.append(
+                    f"上一张画：{last.get('time')} ❌ 失败"
+                    f"（{last.get('reason') or '没有出图'}）"
+                )
         return "\n".join(lines)
 
     # ── 清理旧图 ────────────────────────────────────────────────────────
